@@ -17,6 +17,7 @@ import {addToHistory, loadHistory} from './lib/history.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
 import {useMouseClick} from './lib/use-mouse-click.js'
 import {nextThemeMode, ThemeProvider, type ThemeMode, useTheme} from './theme.js'
+import {spotifyProbe} from './lib/spotify.js'
 import {
   buildChoices,
   download,
@@ -178,7 +179,8 @@ function AppContent({
   const startProbe = useCallback(async (targetUrl: string) => {
     const controller = new AbortController()
     abortRef.current = controller
-    setPlatform(detectPlatform(targetUrl))
+    const detectedPlatform = detectPlatform(targetUrl)
+    setPlatform(detectedPlatform)
     setPhase({name: 'probing', status: 'warming up…'})
     try {
       const ytdlp =
@@ -186,8 +188,11 @@ function AppContent({
         (await ensureYtDlp(status => setPhase({name: 'probing', status}), controller.signal))
       ytdlpRef.current = ytdlp
       if (controller.signal.aborted) return
-      setPhase({name: 'probing', status: 'fetching video info…'})
-      const {info: videoInfo, infoJsonPath} = await probe(ytdlp, targetUrl, controller.signal)
+      const isSpotify = detectedPlatform.key === 'spotify'
+      setPhase({name: 'probing', status: isSpotify ? 'resolving Spotify track…' : 'fetching video info…'})
+      const {info: videoInfo, infoJsonPath} = isSpotify
+        ? await spotifyProbe(ytdlp, targetUrl, controller.signal)
+        : await probe(ytdlp, targetUrl, controller.signal)
       if (controller.signal.aborted) return
       infoJsonRef.current = infoJsonPath
       setInfo(videoInfo)
@@ -341,7 +346,7 @@ function AppContent({
       <Logo />
       <Gap />
       <Text color={theme.primary}>{TAGLINE}</Text>
-      <Text color={theme.gray} dimColor={theme.dimSecondary}>youtube · x · instagram · threads · tiktok · +1800 more</Text>
+      <Text color={theme.gray} dimColor={theme.dimSecondary}>youtube · x · instagram · threads · tiktok · spotify · +1800 more</Text>
       <Gap />
 
       {phase.name === 'input' && (

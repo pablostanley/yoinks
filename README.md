@@ -35,6 +35,7 @@ automatically.
 $ yoinks https://youtu.be/dQw4w9WgXcQ    # straight to the format picker
 $ yoinks                                 # prompts for a url
 $ yoinks --theme light                   # force the light palette
+$ yoinks --embed-chapters <url>          # preserve chapters when available
 ```
 
 yoinks takes over the terminal (full-screen, centered — and restores your
@@ -49,6 +50,11 @@ so it follows light and dark terminal themes without guessing. Press `^t` or
 click the theme control in the footer to cycle through `auto`, `light`, and
 `dark` for the current session. Use `--theme auto`, `--theme light`, or
 `--theme dark` to choose the starting theme for one launch.
+
+From the format picker, press `^o` to open the optional **Download Options**
+menu. Use space to toggle **Embed chapters** (when the source provides them),
+then press enter to apply or `esc` to cancel. This never adds a step to the
+default flow.
 
 <img src="assets/download-options.png" alt="yoinks format picker — resolutions with estimated file sizes, plus audio-only mp3" width="100%">
 

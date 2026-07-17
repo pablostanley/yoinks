@@ -7,6 +7,7 @@ test('parses a url and a spaced theme option without confusing the value for the
   assert.deepEqual(parseArgs(['--theme', 'light', 'https://example.com/video']), {
     help: false,
     version: false,
+    downloadOptions: {embedChapters: false},
     themeMode: 'light',
     initialUrl: 'https://example.com/video',
   })
@@ -16,8 +17,18 @@ test('parses an equals-style theme option after the url', () => {
   assert.deepEqual(parseArgs(['https://example.com/video', '--theme=dark']), {
     help: false,
     version: false,
+    downloadOptions: {embedChapters: false},
     themeMode: 'dark',
     initialUrl: 'https://example.com/video',
+  })
+})
+
+test('parses download options alongside a url without treating them as positional arguments', () => {
+  assert.deepEqual(parseArgs(['https://example.com/video', '--embed-chapters']), {
+    help: false,
+    version: false,
+    initialUrl: 'https://example.com/video',
+    downloadOptions: {embedChapters: true},
   })
 })
 

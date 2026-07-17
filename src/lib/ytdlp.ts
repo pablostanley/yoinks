@@ -6,6 +6,7 @@ import path from 'node:path'
 import {Readable} from 'node:stream'
 import {pipeline} from 'node:stream/promises'
 import {formatBytes} from './format.js'
+import {DOWNLOAD_OPTION_DEFINITIONS, type DownloadOptionId, type DownloadOptions} from './download-options.js'
 
 const YOINKS_DIR = path.join(os.homedir(), '.yoinks', 'bin')
 const RELEASE_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download'
@@ -209,28 +210,40 @@ export type DownloadHandlers = {
   onProcessing: () => void
 }
 
+export type DownloadRequest = {
+  ytdlp: string
+  ffmpegLocation?: string
+  url: string
+  /** When set, reuse the probe's metadata instead of re-extracting — starts much faster. */
+  infoJsonPath?: string
+  choice: DownloadChoice
+  /** User intent, translated to yt-dlp flags only in this module. */
+  downloadOptions: DownloadOptions
+  outDir: string
+}
+
+const YT_DLP_DOWNLOAD_OPTION_ARGS: Readonly<Record<DownloadOptionId, readonly string[]>> = {
+  embedChapters: ['--embed-chapters'],
+}
+
+function downloadOptionArgs(options: DownloadOptions): string[] {
+  return DOWNLOAD_OPTION_DEFINITIONS.flatMap(option =>
+    options[option.id] ? YT_DLP_DOWNLOAD_OPTION_ARGS[option.id] : [],
+  )
+}
+
 const PROGRESS_PREFIX = 'YOINK|'
 const PROGRESS_TEMPLATE = `${PROGRESS_PREFIX}%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s`
 
 let activeChild: ChildProcess | undefined
 process.on('exit', () => activeChild?.kill('SIGTERM'))
 
-export function download(
-  opts: {
-    ytdlp: string
-    ffmpegLocation?: string
-    url: string
-    /** When set, reuse the probe's metadata instead of re-extracting — starts much faster. */
-    infoJsonPath?: string
-    choice: DownloadChoice
-    outDir: string
-  },
-  handlers: DownloadHandlers,
-  signal?: AbortSignal,
-): Promise<string> {
+/** Build the yt-dlp command for a requested download without spawning it. */
+export function buildDownloadArgs(opts: Omit<DownloadRequest, 'ytdlp'>): string[] {
   const args = [
     ...(opts.infoJsonPath ? ['--load-info-json', opts.infoJsonPath] : [opts.url]),
     ...opts.choice.args,
+    ...downloadOptionArgs(opts.downloadOptions),
     '--no-playlist',
     '--no-warnings',
     '--newline',
@@ -247,6 +260,15 @@ export function download(
     path.join(opts.outDir, '%(title).60s.%(ext)s'),
   ]
   if (opts.ffmpegLocation) args.push('--ffmpeg-location', opts.ffmpegLocation)
+  return args
+}
+
+export function download(
+  opts: DownloadRequest,
+  handlers: DownloadHandlers,
+  signal?: AbortSignal,
+): Promise<string> {
+  const args = buildDownloadArgs(opts)
 
   return new Promise((resolve, reject) => {
     const child = spawn(opts.ytdlp, args, {signal})

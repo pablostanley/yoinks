@@ -12,8 +12,10 @@ import {ProgressBar} from './components/progress-bar.js'
 import {Shortcuts} from './components/shortcuts.js'
 import {TextInput} from './components/text-input.js'
 import {clickTargetAt, findFrameRow, frameRowSpan, type ClickTarget} from './lib/click-map.js'
+import {copyFileToClipboard} from './lib/clipboard.js'
 import {formatBytes, formatDuration, formatEta, formatSpeed, shortenPath, truncate, wrapText} from './lib/format.js'
 import {addToHistory, loadHistory} from './lib/history.js'
+import {loadSettings, saveSettings} from './lib/settings.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
 import {useMouseClick} from './lib/use-mouse-click.js'
 import {nextThemeMode, ThemeProvider, type ThemeMode, useTheme} from './theme.js'
@@ -96,7 +98,7 @@ type Phase =
       processing: boolean
       refreshing?: boolean
     }
-  | {name: 'done'; filepath: string}
+  | {name: 'done'; filepath: string; copied?: boolean}
   | {name: 'error'; message: string}
 
 const HINTS: Record<Phase['name'], Array<[string, string]>> = {
@@ -162,6 +164,10 @@ function AppContent({
   const [url, setUrl] = useState(initialUrl ?? '')
   const [urlInput, setUrlInput] = useState('')
   const [history, setHistory] = useState(loadHistory)
+  const [copyToClipboard, setCopyToClipboard] = useState(() => loadSettings().copyToClipboard)
+  const toggleCopyToClipboard = useCallback(() => {
+    setCopyToClipboard(prev => saveSettings({copyToClipboard: !prev}).copyToClipboard)
+  }, [])
   const [platform, setPlatform] = useState<Platform>()
   const [info, setInfo] = useState<VideoInfo>()
   const [choices, setChoices] = useState<DownloadChoice[]>([])
@@ -225,6 +231,10 @@ function AppContent({
         cycleTheme()
         return
       }
+      if (key.ctrl && input === 'd') {
+        toggleCopyToClipboard()
+        return
+      }
       if (key.escape && (phase.name === 'picking' || phase.name === 'error' || phase.name === 'done')) resetToInput()
       if (key.escape && (phase.name === 'probing' || phase.name === 'downloading')) cancelRun()
       if (key.return && (phase.name === 'error' || phase.name === 'done')) resetToInput()
@@ -274,7 +284,8 @@ function AppContent({
         }
         onOutcome({filepath})
         setHistory(addToHistory(url))
-        setPhase({name: 'done', filepath})
+        const copied = copyToClipboard ? copyFileToClipboard(filepath) : false
+        setPhase({name: 'done', filepath, copied})
       } catch (error) {
         if (controller.signal.aborted) return
         setPhase({name: 'error', message: error instanceof Error ? error.message : String(error)})
@@ -283,6 +294,9 @@ function AppContent({
   }
 
   let hints: Array<[string, string]> = [...HINTS[phase.name], ['^t', `theme:${theme.mode}`]]
+  if (phase.name === 'input') {
+    hints = [...hints, ['^d', `copy:${copyToClipboard ? 'on' : 'off'}`]]
+  }
   if (phase.name === 'input' && history.length > 0) {
     hints = [hints[0]!, ['↑', 'history'], ...hints.slice(1)]
   }
@@ -293,6 +307,7 @@ function AppContent({
   const hintAction = (key: string): (() => void) | undefined => {
     if (key === '^c') return () => exit()
     if (key === '^t') return cycleTheme
+    if (key === '^d') return toggleCopyToClipboard
     if (key === 'esc') return phase.name === 'probing' || phase.name === 'downloading' ? cancelRun : resetToInput
     if (key === '↵') {
       if (phase.name === 'input') return () => handleUrlSubmit(urlInput)
@@ -471,6 +486,9 @@ function AppContent({
             <Text color={theme.primary}>find your file in:</Text>
           </Text>
           <Text color={theme.gray} dimColor={theme.dimSecondary}>{shortenPath(phase.filepath, os.homedir(), 60)}</Text>
+          {phase.copied ? (
+            <Text color={theme.gray} dimColor={theme.dimSecondary}>⧉ copied to clipboard — paste it anywhere</Text>
+          ) : null}
           <Gap />
           <Box
             borderStyle="round"

@@ -14,6 +14,13 @@ import {TextInput} from './components/text-input.js'
 import {clickTargetAt, findFrameRow, frameRowSpan, type ClickTarget} from './lib/click-map.js'
 import {formatBytes, formatDuration, formatEta, formatSpeed, shortenPath, truncate, wrapText} from './lib/format.js'
 import {addToHistory, loadHistory} from './lib/history.js'
+import {
+  DEFAULT_DOWNLOAD_OPTIONS,
+  DOWNLOAD_OPTION_DEFINITIONS,
+  setDownloadOption,
+  type DownloadOptionId,
+  type DownloadOptions,
+} from './lib/download-options.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
 import {useMouseClick} from './lib/use-mouse-click.js'
 import {nextThemeMode, ThemeProvider, type ThemeMode, useTheme} from './theme.js'
@@ -32,6 +39,7 @@ const OUT_DIR = path.join(os.homedir(), 'Downloads')
 const YOINK_BUTTON = 'yoink'
 const DONE_LABEL = '↵ yoink another'
 const TAGLINE = 'yoink any video. paste. yoink. done.'
+const OPTION_LIST_LIMIT = 8
 
 const choiceLabel = (choice: DownloadChoice) => `${choice.kind === 'audio' ? '♪ ' : '▶ '}${choice.label}`
 
@@ -111,6 +119,7 @@ const HINTS: Record<Phase['name'], Array<[string, string]>> = {
   picking: [
     ['↑↓', 'choose'],
     ['↵', 'yoink'],
+    ['^o', 'options'],
     ['esc', 'back'],
     ['^c', 'quit'],
   ],
@@ -129,10 +138,11 @@ type AppProps = {
   initialUrl?: string
   clipboardUrl?: string
   initialThemeMode?: ThemeMode
+  initialDownloadOptions?: DownloadOptions
   onOutcome: (outcome: Outcome) => void
 }
 
-export function App({initialThemeMode = 'auto', ...props}: AppProps) {
+export function App({initialThemeMode = 'auto', initialDownloadOptions = DEFAULT_DOWNLOAD_OPTIONS, ...props}: AppProps) {
   const [themeMode, setThemeMode] = useState(initialThemeMode)
   const cycleTheme = useCallback(() => {
     setThemeMode(nextThemeMode)
@@ -140,7 +150,7 @@ export function App({initialThemeMode = 'auto', ...props}: AppProps) {
 
   return (
     <ThemeProvider mode={themeMode}>
-      <AppContent {...props} cycleTheme={cycleTheme} />
+      <AppContent {...props} cycleTheme={cycleTheme} initialDownloadOptions={initialDownloadOptions} />
     </ThemeProvider>
   )
 }
@@ -150,11 +160,13 @@ function AppContent({
   clipboardUrl,
   onOutcome,
   cycleTheme,
+  initialDownloadOptions,
 }: {
   initialUrl?: string
   clipboardUrl?: string
   onOutcome: (outcome: Outcome) => void
   cycleTheme: () => void
+  initialDownloadOptions: DownloadOptions
 }) {
   const theme = useTheme()
   const {exit} = useApp()
@@ -165,8 +177,12 @@ function AppContent({
   const [platform, setPlatform] = useState<Platform>()
   const [info, setInfo] = useState<VideoInfo>()
   const [choices, setChoices] = useState<DownloadChoice[]>([])
+  const [downloadOptions, setDownloadOptions] = useState(initialDownloadOptions)
+  const [downloadOptionsDraft, setDownloadOptionsDraft] = useState<DownloadOptions>()
+  const [pickerView, setPickerView] = useState<'formats' | 'options'>('formats')
   const ytdlpRef = useRef('')
   const highlightRef = useRef(0) // choice under the cursor, for the ↵ hint click
+  const optionHighlightRef = useRef<DownloadOptionId>(DOWNLOAD_OPTION_DEFINITIONS[0].id)
   const infoJsonRef = useRef<string | undefined>(undefined)
   const abortRef = useRef<AbortController | undefined>(undefined)
   const [phase, setPhase] = useState<Phase>(initialUrl ? {name: 'probing', status: 'warming up…'} : {name: 'input'})
@@ -193,6 +209,8 @@ function AppContent({
       setInfo(videoInfo)
       setChoices(buildChoices(videoInfo))
       highlightRef.current = 0
+      setDownloadOptionsDraft(undefined)
+      setPickerView('formats')
       setPhase({name: 'picking'})
     } catch (error) {
       if (controller.signal.aborted) return
@@ -210,6 +228,8 @@ function AppContent({
     setPlatform(undefined)
     setInfo(undefined)
     setChoices([])
+    setDownloadOptionsDraft(undefined)
+    setPickerView('formats')
     setPhase({name: 'input'})
   }, [])
 
@@ -219,13 +239,50 @@ function AppContent({
     setUrlInput(url) // keep the link around so a cancel isn't destructive
   }, [resetToInput, url])
 
+  const openDownloadOptions = () => {
+    setDownloadOptionsDraft(downloadOptions)
+    setPickerView('options')
+  }
+
+  const cancelDownloadOptions = () => {
+    setDownloadOptionsDraft(undefined)
+    setPickerView('formats')
+  }
+
+  const saveDownloadOptions = () => {
+    if (downloadOptionsDraft) setDownloadOptions(downloadOptionsDraft)
+    setDownloadOptionsDraft(undefined)
+    setPickerView('formats')
+  }
+
+  const toggleDownloadOption = (option: DownloadOptionId) => {
+    setDownloadOptionsDraft(current => {
+      const options = current ?? downloadOptions
+      return setDownloadOption(options, option, !options[option])
+    })
+  }
+
+  const toggleHighlightedDownloadOption = () => toggleDownloadOption(optionHighlightRef.current)
+
   useInput(
     (input, key) => {
       if (key.ctrl && input === 't') {
         cycleTheme()
         return
       }
-      if (key.escape && (phase.name === 'picking' || phase.name === 'error' || phase.name === 'done')) resetToInput()
+      if (key.ctrl && input === 'o' && phase.name === 'picking' && pickerView === 'formats') {
+        openDownloadOptions()
+        return
+      }
+      if (phase.name === 'picking' && pickerView === 'options' && input === ' ') {
+        toggleHighlightedDownloadOption()
+        return
+      }
+      if (key.escape && phase.name === 'picking') {
+        if (pickerView === 'options') cancelDownloadOptions()
+        else resetToInput()
+      }
+      if (key.escape && (phase.name === 'error' || phase.name === 'done')) resetToInput()
       if (key.escape && (phase.name === 'probing' || phase.name === 'downloading')) cancelRun()
       if (key.return && (phase.name === 'error' || phase.name === 'done')) resetToInput()
     },
@@ -259,7 +316,7 @@ function AppContent({
       }
       try {
         const ffmpegLocation = await findFfmpeg()
-        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, outDir: OUT_DIR}
+        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, downloadOptions, outDir: OUT_DIR}
         let filepath: string
         try {
           // reuse the probe's metadata — starts immediately instead of re-extracting
@@ -282,7 +339,17 @@ function AppContent({
     })()
   }
 
-  let hints: Array<[string, string]> = [...HINTS[phase.name], ['^t', `theme:${theme.mode}`]]
+  const phaseHints: Array<[string, string]> =
+    phase.name === 'picking' && pickerView === 'options'
+      ? [
+          ['↑↓', 'choose'],
+          ['space', 'toggle'],
+          ['↵', 'done'],
+          ['esc', 'cancel'],
+          ['^c', 'quit'],
+        ]
+      : HINTS[phase.name]
+  let hints: Array<[string, string]> = [...phaseHints, ['^t', `theme:${theme.mode}`]]
   if (phase.name === 'input' && history.length > 0) {
     hints = [hints[0]!, ['↑', 'history'], ...hints.slice(1)]
   }
@@ -293,10 +360,18 @@ function AppContent({
   const hintAction = (key: string): (() => void) | undefined => {
     if (key === '^c') return () => exit()
     if (key === '^t') return cycleTheme
-    if (key === 'esc') return phase.name === 'probing' || phase.name === 'downloading' ? cancelRun : resetToInput
+    if (key === '^o' && phase.name === 'picking' && pickerView === 'formats') return openDownloadOptions
+    if (key === 'space' && phase.name === 'picking' && pickerView === 'options') return toggleHighlightedDownloadOption
+    if (key === 'esc') {
+      if (phase.name === 'probing' || phase.name === 'downloading') return cancelRun
+      if (phase.name === 'picking' && pickerView === 'options') return cancelDownloadOptions
+      return resetToInput
+    }
     if (key === '↵') {
       if (phase.name === 'input') return () => handleUrlSubmit(urlInput)
-      if (phase.name === 'picking') return () => handlePick({value: highlightRef.current})
+      if (phase.name === 'picking') {
+        return pickerView === 'options' ? saveDownloadOptions : () => handlePick({value: highlightRef.current})
+      }
       if (phase.name === 'error' || phase.name === 'done') return resetToInput
     }
     return undefined // ↑↓ / ↑ stay keyboard-only
@@ -307,8 +382,17 @@ function AppContent({
     clickTargets.push({match: `  ${YOINK_BUTTON}  `, padY: 1, action: () => handleUrlSubmit(urlInput)})
   }
   if (phase.name === 'picking') {
-    for (const [index, choice] of choices.entries()) {
-      clickTargets.push({match: choiceLabel(choice), action: () => handlePick({value: index})})
+    if (pickerView === 'formats') {
+      for (const [index, choice] of choices.entries()) {
+        clickTargets.push({match: choiceLabel(choice), action: () => handlePick({value: index})})
+      }
+    } else {
+      for (const option of DOWNLOAD_OPTION_DEFINITIONS) {
+        clickTargets.push({
+          match: option.label,
+          action: () => toggleDownloadOption(option.id),
+        })
+      }
     }
   }
   if (phase.name === 'done') {
@@ -395,18 +479,35 @@ function AppContent({
               {info?.uploader ? ` · ${info.uploader}` : ''}
             </Text>
           </Box>
-          <Panel title="Download" width={38}>
-            <SelectInput
-              indicatorComponent={ChoiceIndicator}
-              itemComponent={ChoiceItem}
-              items={choices.map((choice, index) => ({
-                key: String(index),
-                label: choiceLabel(choice),
-                value: index,
-              }))}
-              onSelect={handlePick}
-              onHighlight={item => (highlightRef.current = item.value)}
-            />
+          <Panel title={pickerView === 'formats' ? 'Download' : 'Download Options'} width={38}>
+            {pickerView === 'formats' ? (
+              <SelectInput
+                indicatorComponent={ChoiceIndicator}
+                itemComponent={ChoiceItem}
+                items={choices.map((choice, index) => ({
+                  key: String(index),
+                  label: choiceLabel(choice),
+                  value: index,
+                }))}
+                onSelect={handlePick}
+                onHighlight={item => (highlightRef.current = item.value)}
+              />
+            ) : (
+              <Box flexDirection="column">
+                <SelectInput<DownloadOptionId>
+                  indicatorComponent={ChoiceIndicator}
+                  itemComponent={ChoiceItem}
+                  items={DOWNLOAD_OPTION_DEFINITIONS.map(option => ({
+                    key: option.id,
+                    label: `${(downloadOptionsDraft ?? downloadOptions)[option.id] ? '●' : '○'} ${option.label}`,
+                    value: option.id,
+                  }))}
+                  limit={OPTION_LIST_LIMIT}
+                  onSelect={saveDownloadOptions}
+                  onHighlight={item => (optionHighlightRef.current = item.value)}
+                />
+              </Box>
+            )}
           </Panel>
         </Box>
       )}

@@ -6,6 +6,7 @@ import path from 'node:path'
 import {Readable} from 'node:stream'
 import {pipeline} from 'node:stream/promises'
 import {formatBytes} from './format.js'
+import {saveAsOutputTemplate} from './save-as.js'
 
 const YOINKS_DIR = path.join(os.homedir(), '.yoinks', 'bin')
 const RELEASE_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download'
@@ -224,6 +225,7 @@ export function download(
     infoJsonPath?: string
     choice: DownloadChoice
     outDir: string
+    saveAs?: string
   },
   handlers: DownloadHandlers,
   signal?: AbortSignal,
@@ -244,7 +246,7 @@ export function download(
     'after_move:filepath',
     '--no-simulate',
     '-o',
-    path.join(opts.outDir, '%(title).60s.%(ext)s'),
+    saveAsOutputTemplate(opts.outDir, opts.saveAs),
   ]
   if (opts.ffmpegLocation) args.push('--ffmpeg-location', opts.ffmpegLocation)
 

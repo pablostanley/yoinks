@@ -15,14 +15,16 @@ const HELP = `
   yoinks — yoink any video. paste. yoink. done.
 
   Usage
-    $ yoinks [url]
+    $ yoinks [url] [--sa <name>]
 
   Examples
     $ yoinks https://youtu.be/dQw4w9WgXcQ
     $ yoinks https://x.com/user/status/123456
+    $ yoinks https://youtu.be/dQw4w9WgXcQ --sa "my clip"
     $ yoinks                 (prompts for a url)
 
   Options
+    --sa <name>      save with this name (extension is added automatically)
     --theme <mode>  use auto, light, or dark for this run
     -h, --help      show this help
     -v, --version   show version
@@ -50,6 +52,7 @@ if (args.version) {
 
 const initialUrl = args.initialUrl
 const initialThemeMode = args.themeMode ?? 'auto'
+const initialSaveAs = args.saveAs
 
 const isTTY = Boolean(process.stdout.isTTY)
 
@@ -85,6 +88,7 @@ const {waitUntilExit} = render(
     initialUrl={initialUrl}
     clipboardUrl={clipboardUrl}
     initialThemeMode={initialThemeMode}
+    initialSaveAs={initialSaveAs}
     onOutcome={result => (outcome = result)}
   />,
   // keep a copy of every frame so clicks can be hit-tested against it

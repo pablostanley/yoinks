@@ -1,10 +1,12 @@
 import {isThemeMode, type ThemeMode} from '../theme.js'
+import {validateSaveAs} from './save-as.js'
 
 export type CliArgs = {
   help: boolean
   version: boolean
   initialUrl?: string
   themeMode?: ThemeMode
+  saveAs?: string
   error?: string
 }
 
@@ -27,6 +29,17 @@ export function parseArgs(args: string[]): CliArgs {
       const value = arg.slice('--theme='.length)
       if (!isThemeMode(value)) return {...result, error: `unknown theme “${value}” — use auto, light, or dark`}
       result.themeMode = value
+    } else if (arg === '--sa') {
+      const value = args[++index]
+      if (!value || value.startsWith('--')) return {...result, error: '--sa needs a filename'}
+      const error = validateSaveAs(value)
+      if (error) return {...result, error}
+      result.saveAs = value.trim()
+    } else if (arg.startsWith('--sa=')) {
+      const value = arg.slice('--sa='.length)
+      const error = validateSaveAs(value)
+      if (error) return {...result, error}
+      result.saveAs = value.trim()
     } else if (arg.startsWith('-')) {
       return {...result, error: `unknown option “${arg}”`}
     } else {

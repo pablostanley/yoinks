@@ -21,11 +21,24 @@ test('parses an equals-style theme option after the url', () => {
   })
 })
 
+test('parses spaced and equals-style save-as options', () => {
+  assert.deepEqual(parseArgs(['--sa', 'my video', 'https://example.com/video']), {
+    help: false,
+    version: false,
+    saveAs: 'my video',
+    initialUrl: 'https://example.com/video',
+  })
+  assert.equal(parseArgs(['https://example.com/video', '--sa=clip.mp4']).saveAs, 'clip.mp4')
+})
+
 test('rejects missing, invalid, and unknown options', () => {
   assert.match(parseArgs(['--theme']).error ?? '', /needs a value/)
   assert.match(parseArgs(['--theme', 'sepia']).error ?? '', /unknown theme/)
   assert.match(parseArgs(['--wat']).error ?? '', /unknown option/)
   assert.match(parseArgs(['one', 'two']).error ?? '', /single url/)
+  assert.match(parseArgs(['--sa']).error ?? '', /needs a filename/)
+  assert.match(parseArgs(['--sa', '--theme', 'light']).error ?? '', /needs a filename/)
+  assert.match(parseArgs(['--sa=../clip']).error ?? '', /cannot contain/)
 })
 
 test('recognizes only supported modes and cycles through all of them', () => {

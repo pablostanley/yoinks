@@ -16,6 +16,8 @@ type Props = {
   submitOnPaste?: (value: string) => boolean
   /** tab pressed — accept a suggestion, etc. */
   onTab?: () => void
+  /** whether this editor should receive keyboard input */
+  isActive?: boolean
 }
 
 const wordLeft = (text: string, from: number) => {
@@ -47,6 +49,7 @@ export function TextInput({
   history = [],
   submitOnPaste,
   onTab,
+  isActive = true,
 }: Props) {
   const theme = useTheme()
   const [cursorState, setCursorState] = useState(value.length)
@@ -166,7 +169,7 @@ export function TextInput({
     edit(next, start + clean.length)
     // a multi-char chunk is a paste — submit right away when it completes the field
     if (clean.length > 1 && value === '' && submitOnPaste?.(next.trim())) onSubmit?.(next)
-  })
+  }, {isActive})
 
   // scroll the window so the cursor stays visible (it can sit one past the end)
   const span = Math.max(8, width)

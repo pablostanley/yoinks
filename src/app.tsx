@@ -15,6 +15,7 @@ import {clickTargetAt, findFrameRow, frameRowSpan, type ClickTarget} from './lib
 import {formatBytes, formatDuration, formatEta, formatSpeed, shortenPath, truncate, wrapText} from './lib/format.js'
 import {addToHistory, loadHistory} from './lib/history.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
+import {validateSaveAs} from './lib/save-as.js'
 import {useMouseClick} from './lib/use-mouse-click.js'
 import {nextThemeMode, ThemeProvider, type ThemeMode, useTheme} from './theme.js'
 import {
@@ -111,6 +112,7 @@ const HINTS: Record<Phase['name'], Array<[string, string]>> = {
   picking: [
     ['↑↓', 'choose'],
     ['↵', 'yoink'],
+    ['s', 'save as'],
     ['esc', 'back'],
     ['^c', 'quit'],
   ],
@@ -129,6 +131,7 @@ type AppProps = {
   initialUrl?: string
   clipboardUrl?: string
   initialThemeMode?: ThemeMode
+  initialSaveAs?: string
   onOutcome: (outcome: Outcome) => void
 }
 
@@ -148,11 +151,13 @@ export function App({initialThemeMode = 'auto', ...props}: AppProps) {
 function AppContent({
   initialUrl,
   clipboardUrl,
+  initialSaveAs,
   onOutcome,
   cycleTheme,
 }: {
   initialUrl?: string
   clipboardUrl?: string
+  initialSaveAs?: string
   onOutcome: (outcome: Outcome) => void
   cycleTheme: () => void
 }) {
@@ -161,6 +166,9 @@ function AppContent({
   const {stdout} = useStdout()
   const [url, setUrl] = useState(initialUrl ?? '')
   const [urlInput, setUrlInput] = useState('')
+  const [saveAs, setSaveAs] = useState(initialSaveAs ?? '')
+  const [saveAsError, setSaveAsError] = useState<string>()
+  const [editingSaveAs, setEditingSaveAs] = useState(false)
   const [history, setHistory] = useState(loadHistory)
   const [platform, setPlatform] = useState<Platform>()
   const [info, setInfo] = useState<VideoInfo>()
@@ -210,6 +218,9 @@ function AppContent({
     setPlatform(undefined)
     setInfo(undefined)
     setChoices([])
+    setSaveAs('')
+    setSaveAsError(undefined)
+    setEditingSaveAs(false)
     setPhase({name: 'input'})
   }, [])
 
@@ -223,6 +234,14 @@ function AppContent({
     (input, key) => {
       if (key.ctrl && input === 't') {
         cycleTheme()
+        return
+      }
+      if (phase.name === 'picking' && editingSaveAs && key.escape) {
+        setEditingSaveAs(false)
+        return
+      }
+      if (phase.name === 'picking' && !editingSaveAs && input === 's') {
+        setEditingSaveAs(true)
         return
       }
       if (key.escape && (phase.name === 'picking' || phase.name === 'error' || phase.name === 'done')) resetToInput()
@@ -247,6 +266,13 @@ function AppContent({
 
   const handlePick = (item: {value: number}) => {
     const choice = choices[item.value]
+    const finalName = saveAs.trim()
+    const nameError = finalName ? validateSaveAs(finalName) : undefined
+    if (nameError) {
+      setSaveAsError(nameError)
+      setEditingSaveAs(true)
+      return
+    }
     const controller = new AbortController()
     abortRef.current = controller
     setPhase({name: 'downloading', choice, processing: false})
@@ -259,7 +285,14 @@ function AppContent({
       }
       try {
         const ffmpegLocation = await findFfmpeg()
-        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, outDir: OUT_DIR}
+        const base = {
+          ytdlp: ytdlpRef.current,
+          ffmpegLocation,
+          url,
+          choice,
+          outDir: OUT_DIR,
+          saveAs: finalName || undefined,
+        }
         let filepath: string
         try {
           // reuse the probe's metadata — starts immediately instead of re-extracting
@@ -283,6 +316,14 @@ function AppContent({
   }
 
   let hints: Array<[string, string]> = [...HINTS[phase.name], ['^t', `theme:${theme.mode}`]]
+  if (phase.name === 'picking' && editingSaveAs) {
+    hints = [
+      ['↵', 'finish name'],
+      ['esc', 'cancel edit'],
+      ['^c', 'quit'],
+      ['^t', `theme:${theme.mode}`],
+    ]
+  }
   if (phase.name === 'input' && history.length > 0) {
     hints = [hints[0]!, ['↑', 'history'], ...hints.slice(1)]
   }
@@ -293,9 +334,12 @@ function AppContent({
   const hintAction = (key: string): (() => void) | undefined => {
     if (key === '^c') return () => exit()
     if (key === '^t') return cycleTheme
+    if (key === 's' && phase.name === 'picking') return () => setEditingSaveAs(true)
+    if (key === 'esc' && phase.name === 'picking' && editingSaveAs) return () => setEditingSaveAs(false)
     if (key === 'esc') return phase.name === 'probing' || phase.name === 'downloading' ? cancelRun : resetToInput
     if (key === '↵') {
       if (phase.name === 'input') return () => handleUrlSubmit(urlInput)
+      if (phase.name === 'picking' && editingSaveAs) return () => setEditingSaveAs(false)
       if (phase.name === 'picking') return () => handlePick({value: highlightRef.current})
       if (phase.name === 'error' || phase.name === 'done') return resetToInput
     }
@@ -310,6 +354,7 @@ function AppContent({
     for (const [index, choice] of choices.entries()) {
       clickTargets.push({match: choiceLabel(choice), action: () => handlePick({value: index})})
     }
+    clickTargets.push({match: 'save as', action: () => setEditingSaveAs(true)})
   }
   if (phase.name === 'done') {
     clickTargets.push({match: DONE_LABEL, padX: 4, padY: 1, action: resetToInput})
@@ -406,7 +451,26 @@ function AppContent({
               }))}
               onSelect={handlePick}
               onHighlight={item => (highlightRef.current = item.value)}
+              isFocused={!editingSaveAs}
             />
+            <Gap />
+            <Text color={theme.gray} dimColor={theme.dimSecondary}>save as (optional)</Text>
+            <TextInput
+              value={saveAs}
+              onChange={value => {
+                setSaveAs(value)
+                setSaveAsError(undefined)
+              }}
+              onSubmit={() => setEditingSaveAs(false)}
+              placeholder="content title"
+              width={30}
+              isActive={editingSaveAs}
+            />
+            {saveAsError ? (
+              <Text color={theme.gray} dimColor={theme.dimSecondary}>✗ {saveAsError}</Text>
+            ) : (
+              <Text color={theme.gray} dimColor={theme.dimSecondary}>extension added automatically</Text>
+            )}
           </Panel>
         </Box>
       )}

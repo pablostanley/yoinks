@@ -34,6 +34,7 @@ automatically.
 ```sh
 $ yoinks https://youtu.be/dQw4w9WgXcQ    # straight to the format picker
 $ yoinks                                 # prompts for a url
+$ yoinks <url> --sa "my clip"             # save as my clip.mp4 (or .mp3)
 $ yoinks --theme light                   # force the light palette
 ```
 
@@ -43,6 +44,9 @@ hit enter. `esc` goes back, `^c` quits. Or just use the mouse — the yoink
 button, the format list and the footer hints are all clickable, and
 clicking the logo takes you back home. Files are saved to `~/Downloads`,
 and the file path is printed to your terminal when you're done.
+Use `--sa <name>` to override the content-derived filename; yoinks keeps the
+extension that matches the format you pick. In the format picker, press `s`
+to enter or edit the same optional save-as name in the TUI.
 
 The default `auto` theme uses your terminal's own foreground and background,
 so it follows light and dark terminal themes without guessing. Press `^t` or

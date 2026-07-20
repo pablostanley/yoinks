@@ -16,11 +16,33 @@ no sketchy redirects.
 
 ## Install
 
+### macOS / Linux
+
+One-liner (installs Node if needed):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/pablostanley/yoinks/main/assets/scripts/install.sh | sh
+```
+
+Or install manually with npm (requires Node 18+):
+
 ```sh
 npm install -g yoinks
 ```
 
-Or try it without installing anything:
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/pablostanley/yoinks/main/assets/scripts/install.ps1 | iex
+```
+
+Or install manually:
+
+```powershell
+npm install -g yoinks
+```
+
+### Try without installing
 
 ```sh
 npx yoinks
@@ -83,7 +105,7 @@ To try it as a global command without publishing: `npm link`, then run
 - [ ] Clipboard detection: launch bare and auto-suggest the url you copied
 - [ ] Self-update for the bundled yt-dlp binary (`yt-dlp -U`)
 - [x] Publish to npm (`npm i -g yoinks` / `npx yoinks`)
-- [ ] `curl yoinks.sh | sh` installer
+- [x] `curl yoinks.sh | sh` installer
 
 ## A note on fair use
 

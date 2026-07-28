@@ -6,9 +6,19 @@ import path from 'node:path'
 import {Readable} from 'node:stream'
 import {pipeline} from 'node:stream/promises'
 import {formatBytes} from './format.js'
+import {
+  downloadGallery,
+  galleryChoices,
+  isInstagramPost,
+  isInstagramReel,
+  probeGallery,
+  type GalleryMode,
+  type GallerySummary,
+} from './gallerydl.js'
 
 const YOINKS_DIR = path.join(os.homedir(), '.yoinks', 'bin')
 const RELEASE_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download'
+const GALLERY_SENTINEL = '__yoinks_gallerydl__'
 
 function ytDlpAssetName(): string {
   if (process.platform === 'win32') return 'yt-dlp.exe'
@@ -16,8 +26,7 @@ function ytDlpAssetName(): string {
   return process.arch === 'arm64' ? 'yt-dlp_linux_aarch64' : 'yt-dlp_linux'
 }
 
-// async on purpose: a spawnSync here blocks the event loop, which freezes
-// ink mid-frame — the user hits enter and sees nothing until it returns
+// async on purpose: a spawnSync here blocks the event loop, which freezes Ink
 function commandWorks(cmd: string, args: string[]): Promise<boolean> {
   return new Promise(resolve => {
     let child
@@ -28,14 +37,11 @@ function commandWorks(cmd: string, args: string[]): Promise<boolean> {
       return
     }
     child.on('error', () => resolve(false))
-    child.on('close', code => resolve(code === 0))
+    child.on('close', (code: number | null) => resolve(code === 0))
   })
 }
 
-/**
- * Resolve a usable yt-dlp binary: system install first, then a previously
- * downloaded copy, then download the standalone binary from GitHub releases.
- */
+/** Resolve a usable yt-dlp binary: system install, cached copy, then official release. */
 export async function ensureYtDlp(onStatus: (message: string) => void, signal?: AbortSignal): Promise<string> {
   if (await commandWorks('yt-dlp', ['--version'])) return 'yt-dlp'
 
@@ -58,13 +64,9 @@ export async function ensureYtDlp(onStatus: (message: string) => void, signal?: 
   return local
 }
 
-/**
- * Find ffmpeg for stream merging / mp3 extraction: system install first,
- * ffmpeg-static as fallback. Returns undefined if neither exists — yt-dlp
- * still works for single-file formats without it.
- */
+/** Find ffmpeg for stream merging / mp3 extraction. */
 export async function findFfmpeg(): Promise<string | undefined> {
-  if (await commandWorks('ffmpeg', ['-version'])) return undefined // on PATH, yt-dlp finds it itself
+  if (await commandWorks('ffmpeg', ['-version'])) return undefined
   try {
     const mod = await import('ffmpeg-static')
     const ffmpegPath = (mod.default ?? mod) as unknown as string | null
@@ -82,6 +84,8 @@ export type VideoInfo = {
   webpage_url?: string
   extractor_key?: string
   formats?: RawFormat[]
+  /** Present when gallery-dl owns this image, gallery, manga, or mixed-media URL. */
+  gallery?: GallerySummary
 }
 
 type RawFormat = {
@@ -99,24 +103,21 @@ type RawFormat = {
 
 export type ProbeResult = {
   info: VideoInfo
-  /** Raw -J output saved to disk so downloads can skip re-extraction via --load-info-json. */
+  /** Raw probe output cached so yt-dlp downloads can skip re-extraction. */
   infoJsonPath: string
 }
 
-export async function probe(ytdlp: string, url: string, signal?: AbortSignal): Promise<ProbeResult> {
+async function probeVideo(ytdlp: string, url: string, signal?: AbortSignal): Promise<ProbeResult> {
   const stdout = await new Promise<string>((resolve, reject) => {
     const child = spawn(ytdlp, ['-J', '--no-playlist', '--no-warnings', url], {signal})
     let out = ''
     let stderr = ''
-    child.stdout.on('data', chunk => (out += chunk))
-    child.stderr.on('data', chunk => (stderr += chunk))
+    child.stdout.on('data', (chunk: Buffer) => (out += chunk.toString()))
+    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()))
     child.on('error', reject)
-    child.on('close', code => {
-      if (code !== 0) {
-        reject(new Error(cleanYtDlpError(stderr) || `yt-dlp exited with code ${code}`))
-      } else {
-        resolve(out)
-      }
+    child.on('close', (code: number | null) => {
+      if (code !== 0) reject(new Error(cleanYtDlpError(stderr) || `yt-dlp exited with code ${code}`))
+      else resolve(out)
     })
   })
 
@@ -132,6 +133,67 @@ export async function probe(ytdlp: string, url: string, signal?: AbortSignal): P
   return {info, infoJsonPath}
 }
 
+async function galleryProbeResult(url: string, signal?: AbortSignal): Promise<ProbeResult> {
+  const gallery = await probeGallery(url, signal)
+  const info: VideoInfo = {
+    title: gallery.title,
+    uploader: gallery.uploader,
+    webpage_url: url,
+    extractor_key: 'GalleryDL',
+    gallery: gallery.summary,
+  }
+  const infoJsonPath = path.join(os.tmpdir(), `yoinks-gallery-${process.pid}-${Date.now()}.json`)
+  await fs.writeFile(infoJsonPath, JSON.stringify(info))
+  return {info, infoJsonPath}
+}
+
+/**
+ * Select the engine from the URL and extracted media:
+ * - Reels / explicit video links: yt-dlp
+ * - Instagram /p/: gallery-dl first; a single video falls back to yt-dlp
+ * - Generic links: yt-dlp first, then gallery-dl for galleries and manga
+ */
+export async function probe(ytdlp: string, url: string, signal?: AbortSignal): Promise<ProbeResult> {
+  if (isInstagramReel(url)) return probeVideo(ytdlp, url, signal)
+
+  if (isInstagramPost(url)) {
+    let galleryError: unknown
+    try {
+      const result = await galleryProbeResult(url, signal)
+      const summary = result.info.gallery!
+      const singleVideo = summary.count === 1 && summary.videoCount === 1 && summary.imageCount === 0
+      if (!singleVideo) return result
+    } catch (error) {
+      galleryError = error
+    }
+
+    try {
+      return await probeVideo(ytdlp, url, signal)
+    } catch (videoError) {
+      throw new Error(combineProbeErrors(videoError, galleryError))
+    }
+  }
+
+  let videoError: unknown
+  try {
+    return await probeVideo(ytdlp, url, signal)
+  } catch (error) {
+    videoError = error
+  }
+
+  try {
+    return await galleryProbeResult(url, signal)
+  } catch (galleryError) {
+    throw new Error(combineProbeErrors(videoError, galleryError))
+  }
+}
+
+function combineProbeErrors(videoError: unknown, galleryError: unknown): string {
+  const video = videoError instanceof Error ? videoError.message : String(videoError ?? '')
+  const gallery = galleryError instanceof Error ? galleryError.message : String(galleryError ?? '')
+  return gallery ? `${video} Gallery fallback: ${gallery}`.trim() : video
+}
+
 export type DownloadChoice = {
   label: string
   kind: 'video' | 'audio'
@@ -141,6 +203,14 @@ export type DownloadChoice = {
 const MAX_VIDEO_CHOICES = 8
 
 export function buildChoices(info: VideoInfo): DownloadChoice[] {
+  if (info.gallery) {
+    return galleryChoices(info.gallery).map(choice => ({
+      kind: 'video',
+      label: choice.label,
+      args: [GALLERY_SENTINEL, choice.mode],
+    }))
+  }
+
   const formats = info.formats ?? []
   const choices: DownloadChoice[] = []
 
@@ -200,7 +270,6 @@ export type DownloadProgress = {
   speed?: number
   eta?: number
   part: number
-  /** How many files this download resolves to (video+audio merges are 2). */
   totalParts: number
 }
 
@@ -215,12 +284,17 @@ const PROGRESS_TEMPLATE = `${PROGRESS_PREFIX}%(progress.downloaded_bytes)s|%(pro
 let activeChild: ChildProcess | undefined
 process.on('exit', () => activeChild?.kill('SIGTERM'))
 
+function galleryMode(choice: DownloadChoice): GalleryMode | undefined {
+  if (choice.args[0] !== GALLERY_SENTINEL) return undefined
+  const mode = choice.args[1]
+  return mode === 'images' || mode === 'videos' ? mode : 'all'
+}
+
 export function download(
   opts: {
     ytdlp: string
     ffmpegLocation?: string
     url: string
-    /** When set, reuse the probe's metadata instead of re-extracting — starts much faster. */
     infoJsonPath?: string
     choice: DownloadChoice
     outDir: string
@@ -228,14 +302,21 @@ export function download(
   handlers: DownloadHandlers,
   signal?: AbortSignal,
 ): Promise<string> {
+  const mode = galleryMode(opts.choice)
+  if (mode) {
+    return downloadGallery(
+      {ytdlp: opts.ytdlp, url: opts.url, mode, outDir: opts.outDir},
+      handlers.onProcessing,
+      signal,
+    )
+  }
+
   const args = [
     ...(opts.infoJsonPath ? ['--load-info-json', opts.infoJsonPath] : [opts.url]),
     ...opts.choice.args,
     '--no-playlist',
     '--no-warnings',
     '--newline',
-    // --print implies --quiet, which suppresses progress bars and the
-    // [Merger]/[ExtractAudio] lines we detect the processing phase from
     '--no-quiet',
     '--progress',
     '--progress-template',
@@ -258,7 +339,6 @@ export function download(
     let totalParts = 1
     let lastDownloaded = 0
     let buffer = ''
-    // every file yt-dlp writes this run, so a cancel can clean up after itself
     const destinations: string[] = []
 
     child.stdout.on('data', (chunk: Buffer) => {
@@ -282,7 +362,6 @@ export function download(
             totalParts,
           })
         } else if (line.includes('Downloading 1 format(s):')) {
-          // "[info] xxx: Downloading 1 format(s): 395+251" — each id is one file
           totalParts = (line.split('format(s):')[1] ?? '').trim().split('+').length
         } else if (line.includes('[Merger]') || line.includes('[ExtractAudio]')) {
           const merging = /^\[Merger\] Merging formats into "(.+)"$/.exec(line)?.[1]
@@ -297,21 +376,17 @@ export function download(
         }
       }
     })
-    child.stderr.on('data', chunk => (stderr += chunk))
+    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()))
     child.on('error', reject)
-    child.on('close', code => {
+    child.on('close', (code: number | null) => {
       activeChild = undefined
       if (signal?.aborted) {
-        // cancelled on purpose — don't leave half-written files behind
         void removePartials(destinations)
         reject(new Error('Download cancelled.'))
         return
       }
-      if (code === 0 && filepath) {
-        resolve(filepath)
-      } else {
-        reject(new Error(cleanYtDlpError(stderr) || `Download failed (yt-dlp exit code ${code}).`))
-      }
+      if (code === 0 && filepath) resolve(filepath)
+      else reject(new Error(cleanYtDlpError(stderr) || `Download failed (yt-dlp exit code ${code}).`))
     })
   })
 }
@@ -333,8 +408,8 @@ function toNumber(value: string | undefined): number | undefined {
 function cleanYtDlpError(stderr: string): string {
   const lines = stderr
     .split('\n')
-    .map(l => l.trim())
-    .filter(l => l.startsWith('ERROR:'))
+    .map(line => line.trim())
+    .filter(line => line.startsWith('ERROR:'))
   const last = lines.at(-1)
   return last ? last.replace(/^ERROR:\s*(\[[^\]]+\]\s*)?/, '') : ''
 }

@@ -21,9 +21,29 @@ test('parses an equals-style theme option after the url', () => {
   })
 })
 
+test('parses a spaced name option without confusing the value for the url', () => {
+  assert.deepEqual(parseArgs(['--name', 'my-clip', 'https://example.com/video']), {
+    help: false,
+    version: false,
+    fileName: 'my-clip',
+    initialUrl: 'https://example.com/video',
+  })
+})
+
+test('parses an equals-style name option after the url', () => {
+  assert.deepEqual(parseArgs(['https://example.com/video', '--name=my-clip']), {
+    help: false,
+    version: false,
+    fileName: 'my-clip',
+    initialUrl: 'https://example.com/video',
+  })
+})
+
 test('rejects missing, invalid, and unknown options', () => {
   assert.match(parseArgs(['--theme']).error ?? '', /needs a value/)
   assert.match(parseArgs(['--theme', 'sepia']).error ?? '', /unknown theme/)
+  assert.match(parseArgs(['--name']).error ?? '', /needs a value/)
+  assert.match(parseArgs(['--name=']).error ?? '', /needs a value/)
   assert.match(parseArgs(['--wat']).error ?? '', /unknown option/)
   assert.match(parseArgs(['one', 'two']).error ?? '', /single url/)
 })

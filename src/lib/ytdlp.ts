@@ -224,6 +224,8 @@ export function download(
     infoJsonPath?: string
     choice: DownloadChoice
     outDir: string
+    /** When set, save as this literal file name (extension still added by yt-dlp). */
+    fileName?: string
   },
   handlers: DownloadHandlers,
   signal?: AbortSignal,
@@ -244,7 +246,7 @@ export function download(
     'after_move:filepath',
     '--no-simulate',
     '-o',
-    path.join(opts.outDir, '%(title).60s.%(ext)s'),
+    path.join(opts.outDir, opts.fileName ? `${opts.fileName}.%(ext)s` : '%(title).60s.%(ext)s'),
   ]
   if (opts.ffmpegLocation) args.push('--ffmpeg-location', opts.ffmpegLocation)
 

@@ -5,6 +5,7 @@ export type CliArgs = {
   version: boolean
   initialUrl?: string
   themeMode?: ThemeMode
+  fileName?: string
   error?: string
 }
 
@@ -27,6 +28,14 @@ export function parseArgs(args: string[]): CliArgs {
       const value = arg.slice('--theme='.length)
       if (!isThemeMode(value)) return {...result, error: `unknown theme “${value}” — use auto, light, or dark`}
       result.themeMode = value
+    } else if (arg === '--name') {
+      const value = args[++index]
+      if (!value) return {...result, error: '--name needs a value: the file name to save as (without extension)'}
+      result.fileName = value
+    } else if (arg.startsWith('--name=')) {
+      const value = arg.slice('--name='.length)
+      if (!value) return {...result, error: '--name needs a value: the file name to save as (without extension)'}
+      result.fileName = value
     } else if (arg.startsWith('-')) {
       return {...result, error: `unknown option “${arg}”`}
     } else {

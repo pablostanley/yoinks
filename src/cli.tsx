@@ -24,6 +24,7 @@ const HELP = `
 
   Options
     --theme <mode>  use auto, light, or dark for this run
+    --name <file>   save as this file name (extension added automatically)
     -h, --help      show this help
     -v, --version   show version
 
@@ -85,6 +86,7 @@ const {waitUntilExit} = render(
     initialUrl={initialUrl}
     clipboardUrl={clipboardUrl}
     initialThemeMode={initialThemeMode}
+    fileName={args.fileName}
     onOutcome={result => (outcome = result)}
   />,
   // keep a copy of every frame so clicks can be hit-tested against it

@@ -129,6 +129,7 @@ type AppProps = {
   initialUrl?: string
   clipboardUrl?: string
   initialThemeMode?: ThemeMode
+  fileName?: string
   onOutcome: (outcome: Outcome) => void
 }
 
@@ -148,11 +149,13 @@ export function App({initialThemeMode = 'auto', ...props}: AppProps) {
 function AppContent({
   initialUrl,
   clipboardUrl,
+  fileName,
   onOutcome,
   cycleTheme,
 }: {
   initialUrl?: string
   clipboardUrl?: string
+  fileName?: string
   onOutcome: (outcome: Outcome) => void
   cycleTheme: () => void
 }) {
@@ -259,7 +262,7 @@ function AppContent({
       }
       try {
         const ffmpegLocation = await findFfmpeg()
-        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, outDir: OUT_DIR}
+        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, outDir: OUT_DIR, fileName}
         let filepath: string
         try {
           // reuse the probe's metadata — starts immediately instead of re-extracting

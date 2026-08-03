@@ -24,6 +24,7 @@ const HELP = `
 
   Options
     --theme <mode>  use auto, light, or dark for this run
+    --cookies-from-browser <browser>  use cookies from an installed browser (chrome, firefox, safari, edge, brave, …)
     -h, --help      show this help
     -v, --version   show version
 
@@ -85,6 +86,7 @@ const {waitUntilExit} = render(
     initialUrl={initialUrl}
     clipboardUrl={clipboardUrl}
     initialThemeMode={initialThemeMode}
+    cookiesFromBrowser={args.cookiesFromBrowser}
     onOutcome={result => (outcome = result)}
   />,
   // keep a copy of every frame so clicks can be hit-tested against it

@@ -103,9 +103,17 @@ export type ProbeResult = {
   infoJsonPath: string
 }
 
-export async function probe(ytdlp: string, url: string, signal?: AbortSignal): Promise<ProbeResult> {
+export async function probe(
+  ytdlp: string,
+  url: string,
+  signal?: AbortSignal,
+  cookiesFromBrowser?: string,
+): Promise<ProbeResult> {
+  const args = ['-J', '--no-playlist', '--no-warnings']
+  if (cookiesFromBrowser) args.push('--cookies-from-browser', cookiesFromBrowser)
+  args.push(url)
   const stdout = await new Promise<string>((resolve, reject) => {
-    const child = spawn(ytdlp, ['-J', '--no-playlist', '--no-warnings', url], {signal})
+    const child = spawn(ytdlp, args, {signal})
     let out = ''
     let stderr = ''
     child.stdout.on('data', chunk => (out += chunk))
@@ -224,12 +232,14 @@ export function download(
     infoJsonPath?: string
     choice: DownloadChoice
     outDir: string
+    cookiesFromBrowser?: string
   },
   handlers: DownloadHandlers,
   signal?: AbortSignal,
 ): Promise<string> {
   const args = [
     ...(opts.infoJsonPath ? ['--load-info-json', opts.infoJsonPath] : [opts.url]),
+    ...(opts.cookiesFromBrowser ? ['--cookies-from-browser', opts.cookiesFromBrowser] : []),
     ...opts.choice.args,
     '--no-playlist',
     '--no-warnings',

@@ -21,9 +21,29 @@ test('parses an equals-style theme option after the url', () => {
   })
 })
 
+test('parses a spaced cookies-from-browser option without confusing the value for the url', () => {
+  assert.deepEqual(parseArgs(['--cookies-from-browser', 'firefox', 'https://example.com/video']), {
+    help: false,
+    version: false,
+    cookiesFromBrowser: 'firefox',
+    initialUrl: 'https://example.com/video',
+  })
+})
+
+test('parses an equals-style cookies-from-browser option after the url', () => {
+  assert.deepEqual(parseArgs(['https://example.com/video', '--cookies-from-browser=chrome']), {
+    help: false,
+    version: false,
+    cookiesFromBrowser: 'chrome',
+    initialUrl: 'https://example.com/video',
+  })
+})
+
 test('rejects missing, invalid, and unknown options', () => {
   assert.match(parseArgs(['--theme']).error ?? '', /needs a value/)
   assert.match(parseArgs(['--theme', 'sepia']).error ?? '', /unknown theme/)
+  assert.match(parseArgs(['--cookies-from-browser']).error ?? '', /needs a value/)
+  assert.match(parseArgs(['--cookies-from-browser=']).error ?? '', /needs a value/)
   assert.match(parseArgs(['--wat']).error ?? '', /unknown option/)
   assert.match(parseArgs(['one', 'two']).error ?? '', /single url/)
 })

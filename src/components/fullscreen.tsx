@@ -34,7 +34,7 @@ export function FullScreen({children}: {children: ReactNode}) {
           rounds each one independently — spacer rows collapse into their
           neighbors while extra blanks open up elsewhere */}
       <Box flexDirection="column" alignItems="center" flexShrink={0}>
-        {children}
+          {children}
       </Box>
     </Box>
   )

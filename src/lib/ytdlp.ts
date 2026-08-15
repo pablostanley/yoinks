@@ -6,6 +6,7 @@ import path from 'node:path'
 import {Readable} from 'node:stream'
 import {pipeline} from 'node:stream/promises'
 import {formatBytes} from './format.js'
+import {Translations} from "../locales/types";
 
 const YOINKS_DIR = path.join(os.homedir(), '.yoinks', 'bin')
 const RELEASE_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download'
@@ -140,7 +141,8 @@ export type DownloadChoice = {
 
 const MAX_VIDEO_CHOICES = 8
 
-export function buildChoices(info: VideoInfo): DownloadChoice[] {
+export function buildChoices(info: VideoInfo, t: Translations): DownloadChoice[] {
+
   const formats = info.formats ?? []
   const choices: DownloadChoice[] = []
 
@@ -172,7 +174,7 @@ export function buildChoices(info: VideoInfo): DownloadChoice[] {
   if (choices.length === 0) {
     choices.push({
       kind: 'video',
-      label: 'best available · mp4',
+      label: t.BEST_QUALITY.concat(' · mp4'),
       args: ['-f', 'bv*+ba/b', '--merge-output-format', 'mp4'],
     })
   }
@@ -180,7 +182,7 @@ export function buildChoices(info: VideoInfo): DownloadChoice[] {
   const audioSizeLabel = audioSize ? ` · ~${formatBytes(audioSize)}` : ''
   choices.push({
     kind: 'audio',
-    label: `audio only · mp3${audioSizeLabel}`,
+    label: t.AUDIO_ONLY.concat(` · mp3${audioSizeLabel}`),
     args: ['-f', 'ba/b', '-x', '--audio-format', 'mp3', '--audio-quality', '0'],
   })
 

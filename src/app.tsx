@@ -27,13 +27,11 @@ import {
   type DownloadProgress,
   type VideoInfo,
 } from './lib/ytdlp.js'
-
-const OUT_DIR = path.join(os.homedir(), 'Downloads')
-const YOINK_BUTTON = 'yoink'
-const DONE_LABEL = '↵ yoink another'
-const TAGLINE = 'yoink any video. paste. yoink. done.'
+import {LanguageProvider, useTranslation} from "./locales/LanguageContext";
 
 const choiceLabel = (choice: DownloadChoice) => `${choice.kind === 'audio' ? '♪ ' : '▶ '}${choice.label}`
+
+const OUT_DIR = path.join(os.homedir(), 'Downloads')
 
 function ChoiceIndicator({isSelected}: IndicatorProps) {
   const theme = useTheme()
@@ -85,46 +83,6 @@ function indeterminateMeta(progress: DownloadProgress): string {
 
 export type Outcome = {filepath?: string}
 
-type Phase =
-  | {name: 'input'; warning?: string}
-  | {name: 'probing'; status: string}
-  | {name: 'picking'}
-  | {
-      name: 'downloading'
-      choice: DownloadChoice
-      progress?: DownloadProgress
-      processing: boolean
-      refreshing?: boolean
-    }
-  | {name: 'done'; filepath: string}
-  | {name: 'error'; message: string}
-
-const HINTS: Record<Phase['name'], Array<[string, string]>> = {
-  input: [
-    ['↵', 'yoink'],
-    ['^c', 'quit'],
-  ],
-  probing: [
-    ['esc', 'cancel'],
-    ['^c', 'quit'],
-  ],
-  picking: [
-    ['↑↓', 'choose'],
-    ['↵', 'yoink'],
-    ['esc', 'back'],
-    ['^c', 'quit'],
-  ],
-  downloading: [
-    ['esc', 'cancel'],
-    ['^c', 'quit'],
-  ],
-  done: [['^c', 'quit']],
-  error: [
-    ['↵', 'try again'],
-    ['^c', 'quit'],
-  ],
-}
-
 type AppProps = {
   initialUrl?: string
   clipboardUrl?: string
@@ -139,9 +97,11 @@ export function App({initialThemeMode = 'auto', ...props}: AppProps) {
   }, [])
 
   return (
+      <LanguageProvider>
     <ThemeProvider mode={themeMode}>
       <AppContent {...props} cycleTheme={cycleTheme} />
     </ThemeProvider>
+      </LanguageProvider>
   )
 }
 
@@ -157,6 +117,10 @@ function AppContent({
   cycleTheme: () => void
 }) {
   const theme = useTheme()
+
+  // t is the translation dictionary, nextLanguage is used to switch between all the available languages
+  const { t, nextLanguage } = useTranslation()
+
   const {exit} = useApp()
   const {stdout} = useStdout()
   const [url, setUrl] = useState(initialUrl ?? '')
@@ -169,36 +133,81 @@ function AppContent({
   const highlightRef = useRef(0) // choice under the cursor, for the ↵ hint click
   const infoJsonRef = useRef<string | undefined>(undefined)
   const abortRef = useRef<AbortController | undefined>(undefined)
-  const [phase, setPhase] = useState<Phase>(initialUrl ? {name: 'probing', status: 'warming up…'} : {name: 'input'})
+  const [phase, setPhase] = useState<Phase>(initialUrl ? {name: 'probing', status: t.WARMING_UP} : {name: 'input'})
 
   const columns = stdout?.columns && stdout.columns > 0 ? stdout.columns : 80
   const boxWidth = Math.max(14, Math.min(64, columns - 6))
   const contentWidth = Math.max(10, Math.min(columns - 4, 78))
 
+  const YOINK_BUTTON = t.YOINK_BUTTON
+  const DONE_LABEL = t.DONE_LABEL
+  const TAGLINE = t.TAGLINE
+
+  // We do not translate phases names as it's used in backend only
+  type Phase =
+      | {name: 'input'; warning?: string}
+      | {name: 'probing'; status: string}
+      | {name: 'picking'; status: string}
+      | {
+    name: 'downloading'
+    choice: DownloadChoice
+    progress?: DownloadProgress
+    processing: boolean
+    refreshing?: boolean
+  }
+      | {name: 'done'; filepath: string}
+      | {name: 'error'; message: string}
+
+  const HINTS: Record<Phase['name'], Array<[string, string]>> = {
+    input: [
+      ['↵', t.DOWNLOAD_LABEL],
+      ['^l', t.CHANGE_LANGUAGE_LABEL],
+      ['^c', t.QUIT],
+    ],
+    probing: [
+      ['esc', t.CANCEL],
+      ['^c', t.QUIT],
+    ],
+    picking: [
+      ['↑↓', t.CHOOSE],
+      ['↵', t.DOWNLOAD_LABEL],
+      ['esc', t.BACK],
+      ['^c', t.QUIT],
+    ],
+    downloading: [
+      ['esc', t.CANCEL],
+      ['^c', t.QUIT],
+    ],
+    done: [['^c', t.QUIT]],
+    error: [
+      ['↵', t.TRY_AGAIN],
+      ['^c', t.QUIT],
+    ],
+  }
   const startProbe = useCallback(async (targetUrl: string) => {
     const controller = new AbortController()
     abortRef.current = controller
     setPlatform(detectPlatform(targetUrl))
-    setPhase({name: 'probing', status: 'warming up…'})
+    setPhase({name: 'probing', status: t.WARMING_UP})
     try {
       const ytdlp =
         ytdlpRef.current ||
         (await ensureYtDlp(status => setPhase({name: 'probing', status}), controller.signal))
       ytdlpRef.current = ytdlp
       if (controller.signal.aborted) return
-      setPhase({name: 'probing', status: 'fetching video info…'})
+      setPhase({name: 'probing', status: t.WARMING_UP})
       const {info: videoInfo, infoJsonPath} = await probe(ytdlp, targetUrl, controller.signal)
       if (controller.signal.aborted) return
       infoJsonRef.current = infoJsonPath
       setInfo(videoInfo)
-      setChoices(buildChoices(videoInfo))
+      setChoices(buildChoices(videoInfo, t))
       highlightRef.current = 0
-      setPhase({name: 'picking'})
+      setPhase({name: 'picking', status: t.FETCHING_VIDEO_INFO})
     } catch (error) {
       if (controller.signal.aborted) return
       setPhase({name: 'error', message: error instanceof Error ? error.message : String(error)})
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     if (initialUrl) void startProbe(initialUrl)
@@ -221,6 +230,10 @@ function AppContent({
 
   useInput(
     (input, key) => {
+      if (input.toLowerCase() === 'l') {
+        nextLanguage();
+        return;
+      }
       if (key.ctrl && input === 't') {
         cycleTheme()
         return
@@ -235,7 +248,7 @@ function AppContent({
   const handleUrlSubmit = (value: string) => {
     const trimmed = value.trim()
     if (!isProbablyUrl(trimmed)) {
-      setPhase({name: 'input', warning: 'that doesn’t look like a link — paste a full url'})
+      setPhase({name: 'input', warning: t.WARNING_WRONG_URL})
       return
     }
     setUrl(trimmed)
@@ -282,9 +295,9 @@ function AppContent({
     })()
   }
 
-  let hints: Array<[string, string]> = [...HINTS[phase.name], ['^t', `theme:${theme.mode}`]]
+  let hints: Array<[string, string]> = [...HINTS[phase.name], ['^t', `${t.THEME}:${t.themes[theme.mode]}`]]
   if (phase.name === 'input' && history.length > 0) {
-    hints = [hints[0]!, ['↑', 'history'], ...hints.slice(1)]
+    hints = [hints[0]!, ['↑', t.HISTORY], ...hints.slice(1)]
   }
 
   // Anything a mouse user would expect to press is clickable. Targets are
@@ -293,6 +306,7 @@ function AppContent({
   const hintAction = (key: string): (() => void) | undefined => {
     if (key === '^c') return () => exit()
     if (key === '^t') return cycleTheme
+    if (key === '^l') return nextLanguage
     if (key === 'esc') return phase.name === 'probing' || phase.name === 'downloading' ? cancelRun : resetToInput
     if (key === '↵') {
       if (phase.name === 'input') return () => handleUrlSubmit(urlInput)
@@ -341,12 +355,12 @@ function AppContent({
       <Logo />
       <Gap />
       <Text color={theme.primary}>{TAGLINE}</Text>
-      <Text color={theme.gray} dimColor={theme.dimSecondary}>youtube · x · instagram · threads · tiktok · +1800 more</Text>
+      <Text color={theme.gray} dimColor={theme.dimSecondary}>{t.PLATFORMS}</Text>
       <Gap />
 
       {phase.name === 'input' && (
         <Box flexDirection="column" alignItems="center">
-          <FramedInput title="Paste a link" width={boxWidth} button={YOINK_BUTTON}>
+          <FramedInput title={t.PASTE_A_LINK} width={boxWidth} button={YOINK_BUTTON}>
             <TextInput
               value={urlInput}
               onChange={setUrlInput}
@@ -363,9 +377,9 @@ function AppContent({
           {phase.warning ? (
             <Text color={theme.gray} dimColor={theme.dimSecondary}>✗ {phase.warning}</Text>
           ) : clipboardOffered ? (
-            <Text color={theme.gray} dimColor={theme.dimSecondary}>link in your clipboard — ⇥ to paste it</Text>
+            <Text color={theme.gray} dimColor={theme.dimSecondary}>{t.LINK_IN_YOUR_CLIPBOARD} — ⇥ {t.TO_PASTE_IT}</Text>
           ) : clipboardAccepted ? (
-            <Text color={theme.gray} dimColor={theme.dimSecondary}>from your clipboard — ↵ to yoink it</Text>
+            <Text color={theme.gray} dimColor={theme.dimSecondary}>{t.FROM_YOUR_CLIPBOARD} — ↵ {t.TO_YOINK_IT}</Text>
           ) : null}
         </Box>
       )}
@@ -381,7 +395,7 @@ function AppContent({
       {phase.name === 'picking' && platform && (
         <Box width={contentWidth}>
           <Box flexDirection="column" flexGrow={1} flexBasis={0} paddingTop={1} paddingRight={3}>
-            {/* wrapped by hand so continuation lines stay flush left —
+            {/* wrapped by hand, so continuation lines stay flush left —
                 ink's wrapping keeps the break's space as a 1-cell indent */}
             {wrapText(info?.title ?? '', Math.max(10, contentWidth - 41)).map((line, index) => (
               <Text key={index} bold color={theme.primary}>
@@ -395,7 +409,7 @@ function AppContent({
               {info?.uploader ? ` · ${info.uploader}` : ''}
             </Text>
           </Box>
-          <Panel title="Download" width={38}>
+          <Panel title={t.DOWNLOAD_LABEL} width={38}>
             <SelectInput
               indicatorComponent={ChoiceIndicator}
               itemComponent={ChoiceItem}
@@ -427,7 +441,7 @@ function AppContent({
                 <Text color={theme.primary}>
                   <Spinner type="dots" />
                 </Text>
-                <Text color={theme.gray} dimColor={theme.dimSecondary}> processing…</Text>
+                <Text color={theme.gray} dimColor={theme.dimSecondary}> {t.PROCESSING}…</Text>
               </Text>
             </>
           ) : phase.progress?.totalBytes ? (
@@ -442,7 +456,7 @@ function AppContent({
                 <Text color={theme.primary}>
                   <Spinner type="dots" />
                 </Text>
-                <Text color={theme.gray} dimColor={theme.dimSecondary}> downloading…</Text>
+                <Text color={theme.gray} dimColor={theme.dimSecondary}> {t.DOWNLOAD_LABEL}…</Text>
               </Text>
               <Gap />
               <Text color={theme.gray} dimColor={theme.dimSecondary}>{indeterminateMeta(phase.progress)}</Text>
@@ -456,7 +470,7 @@ function AppContent({
                   <Spinner type="dots" />
                 </Text>
                 <Text color={theme.gray} dimColor={theme.dimSecondary}>
-                  {phase.refreshing ? ' link expired — grabbing a fresh one…' : ' starting download…'}
+                  {phase.refreshing ? t.LINK_EXPIRED_GRABBING_A_NEW_ONE : t.STARTING_DOWNLOAD}
                 </Text>
               </Text>
             </>
@@ -467,8 +481,8 @@ function AppContent({
       {phase.name === 'done' && (
         <Box flexDirection="column" alignItems="center">
           <Text>
-            <Text bold color={theme.primary}>✓ yoinked! </Text>
-            <Text color={theme.primary}>find your file in:</Text>
+            <Text bold color={theme.primary}>✓ {t.YOINKED}! </Text>
+            <Text color={theme.primary}>{t.FIND_YOUR_FILE_IN}:</Text>
           </Text>
           <Text color={theme.gray} dimColor={theme.dimSecondary}>{shortenPath(phase.filepath, os.homedir(), 60)}</Text>
           <Gap />

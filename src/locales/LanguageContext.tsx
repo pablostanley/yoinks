@@ -23,16 +23,33 @@ export const LanguageProvider = ({ children }: { children: ReactNode }) => {
     const [language, setLanguage] = useState<Language>('en'); // Anglais par défaut
 
     /**
-     * Change the language of the application. It's result is equivalent to cycleTheme functions but with the list of available languages.
+     * Change the language of the application. Its result is equivalent to cycleTheme functions but with the list of available languages.
      */
     const nextLanguage = (): void => {
         setLanguage(LANG[(LANG.indexOf(language) + 1) % LANG.length]!)
     }
 
+    /*
+     * This function returns a proxy object that intercepts property access on the current translation dictionary. It is used as a fallback mechanism for missing translations.
+     */
+    const getTranslationWithFallback = (language: Language): Translations => {
+        const currentDict = translations[language];
+
+        return new Proxy(currentDict, {
+            get(target, prop: string) {
+                // If a key does not exists or if the value is an empty string, return the English translation.
+                if (!(prop in target) || target[prop as keyof typeof target] === '') {
+                    return en[prop as keyof typeof en];
+                }
+                return target[prop as keyof typeof target];
+            },
+        }) as Translations;
+    };
+
     const value = {
         language,
         nextLanguage,
-        t: translations[language],
+        t: getTranslationWithFallback(language),
     };
 
     return (<LanguageContext.Provider value={value}>{children}</LanguageContext.Provider>);

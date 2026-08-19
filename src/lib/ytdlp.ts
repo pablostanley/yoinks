@@ -103,9 +103,19 @@ export type ProbeResult = {
   infoJsonPath: string
 }
 
-export async function probe(ytdlp: string, url: string, signal?: AbortSignal): Promise<ProbeResult> {
-  const stdout = await new Promise<string>((resolve, reject) => {
-    const child = spawn(ytdlp, ['-J', '--no-playlist', '--no-warnings', url], {signal})
+// YouTube's default clients (android_vr, tv, etc.) increasingly return signed
+// URLs that 403 without a PO token. The mweb client sidesteps that for most
+// public videos, so it's the fallback we retry with once the default path
+// fails with a 403 — see https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide
+const YOUTUBE_MWEB_FALLBACK_ARGS = ['--extractor-args', 'youtube:player-client=mweb']
+
+function isForbiddenError(message: string): boolean {
+  return /HTTP Error 403/i.test(message)
+}
+
+function runYtDlpJson(ytdlp: string, url: string, extraArgs: string[], signal?: AbortSignal): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(ytdlp, ['-J', '--no-playlist', '--no-warnings', ...extraArgs, url], {signal})
     let out = ''
     let stderr = ''
     child.stdout.on('data', chunk => (out += chunk))
@@ -119,6 +129,16 @@ export async function probe(ytdlp: string, url: string, signal?: AbortSignal): P
       }
     })
   })
+}
+
+export async function probe(ytdlp: string, url: string, signal?: AbortSignal): Promise<ProbeResult> {
+  let stdout: string
+  try {
+    stdout = await runYtDlpJson(ytdlp, url, [], signal)
+  } catch (error) {
+    if (!(error instanceof Error) || !isForbiddenError(error.message)) throw error
+    stdout = await runYtDlpJson(ytdlp, url, YOUTUBE_MWEB_FALLBACK_ARGS, signal)
+  }
 
   let info: VideoInfo
   try {
@@ -215,22 +235,37 @@ const PROGRESS_TEMPLATE = `${PROGRESS_PREFIX}%(progress.downloaded_bytes)s|%(pro
 let activeChild: ChildProcess | undefined
 process.on('exit', () => activeChild?.kill('SIGTERM'))
 
-export function download(
-  opts: {
-    ytdlp: string
-    ffmpegLocation?: string
-    url: string
-    /** When set, reuse the probe's metadata instead of re-extracting — starts much faster. */
-    infoJsonPath?: string
-    choice: DownloadChoice
-    outDir: string
-  },
+export type DownloadOpts = {
+  ytdlp: string
+  ffmpegLocation?: string
+  url: string
+  /** When set, reuse the probe's metadata instead of re-extracting — starts much faster. */
+  infoJsonPath?: string
+  choice: DownloadChoice
+  outDir: string
+}
+
+export async function download(opts: DownloadOpts, handlers: DownloadHandlers, signal?: AbortSignal): Promise<string> {
+  try {
+    return await runDownload(opts, [], handlers, signal)
+  } catch (error) {
+    if (!(error instanceof Error) || !isForbiddenError(error.message)) throw error
+    // Default client's URLs 403'd (usually a missing PO token) — retry once
+    // against the mweb client, which works for most public videos without one.
+    return runDownload(opts, YOUTUBE_MWEB_FALLBACK_ARGS, handlers, signal)
+  }
+}
+
+function runDownload(
+  opts: DownloadOpts,
+  extraArgs: string[],
   handlers: DownloadHandlers,
   signal?: AbortSignal,
 ): Promise<string> {
   const args = [
     ...(opts.infoJsonPath ? ['--load-info-json', opts.infoJsonPath] : [opts.url]),
     ...opts.choice.args,
+    ...extraArgs,
     '--no-playlist',
     '--no-warnings',
     '--newline',

@@ -302,7 +302,10 @@ export function download(
     child.on('close', code => {
       activeChild = undefined
       if (signal?.aborted) {
-        // cancelled on purpose — don't leave half-written files behind
+        // Cancelled on purpose. Cleanup already ran at abort time (it must
+        // not wait for this event: a grandchild like ffmpeg inheriting our
+        // stdout can delay close by the whole length of its run). Sweep
+        // once more for Destination lines that streamed past the abort.
         void removePartials(destinations)
         reject(new Error('Download cancelled.'))
         return
@@ -313,15 +316,57 @@ export function download(
         reject(new Error(cleanYtDlpError(stderr) || `Download failed (yt-dlp exit code ${code}).`))
       }
     })
+    // Abort-time cleanup: waiting for 'close' here means a surviving
+    // grandchild (ffmpeg mid-merge, a shell's sleep) holding the inherited
+    // stdio pipes delays cleanup until it exits — the cancelled download's
+    // `.part` fragments stay on disk the whole time. Destinations are parsed
+    // live off the flowing stream, so sweep immediately from what is known;
+    // the close handler above re-sweeps for late arrivals.
+    signal?.addEventListener(
+      'abort',
+      () => {
+        void removePartials(destinations)
+      },
+      {once: true},
+    )
   })
 }
 
-function removePartials(destinations: string[]): Promise<unknown> {
-  return Promise.allSettled(
-    destinations
-      .flatMap(dest => [dest, `${dest}.part`, `${dest}.ytdl`])
-      .map(file => fs.rm(file, {force: true})),
-  )
+async function removePartials(destinations: string[]): Promise<unknown> {
+  console.error('SWEEP destinations:', JSON.stringify(destinations))
+  const artifactLists = await Promise.all(destinations.map(async dest => {
+    const l = await partialArtifacts(dest)
+    console.error('SWEEP artifacts:', JSON.stringify(l))
+    return l
+  }))
+  return Promise.allSettled(artifactLists.flat().map(file => fs.rm(file, {force: true})))
+}
+
+/**
+ * Every file yt-dlp leaves beside one destination: the `.part` file itself,
+ * its `.part-Frag<n>` range fragments (a plain rm of the `.part` misses these),
+ * and the legacy `.ytdl` state file.
+ */
+async function partialArtifacts(dest: string): Promise<string[]> {
+  const dir = path.dirname(dest)
+  const base = path.basename(dest)
+  let siblings: string[] = []
+  try {
+    const all = await fs.readdir(dir)
+    siblings = all
+      .filter(name => {
+        if (!name.startsWith(base)) return false
+        // Accept the file itself plus yt-dlp's suffix family (`-Frag<n>`,
+        // `.part*`, `.ytdl`) while never touching a user's similarly-named
+        // files like `<dest>-notes.txt`.
+        const rest = name.slice(base.length)
+        return rest === '' || rest.startsWith('.') || rest.startsWith('-')
+      })
+      .map(name => path.join(dir, name))
+  } catch {
+    // vanished mid-sweep — nothing left to clean there
+  }
+  return [...new Set([dest, `${dest}.ytdl`, ...siblings])]
 }
 
 function toNumber(value: string | undefined): number | undefined {

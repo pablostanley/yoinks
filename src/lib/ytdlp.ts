@@ -9,6 +9,9 @@ import {formatBytes} from './format.js'
 
 const YOINKS_DIR = path.join(os.homedir(), '.yoinks', 'bin')
 const RELEASE_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download'
+const LATEST_RELEASE_API = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest'
+const UPDATE_STAMP = path.join(YOINKS_DIR, 'update-check.json')
+const UPDATE_CHECK_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000
 
 function ytDlpAssetName(): string {
   if (process.platform === 'win32') return 'yt-dlp.exe'
@@ -32,6 +35,50 @@ function commandWorks(cmd: string, args: string[]): Promise<boolean> {
   })
 }
 
+// same as commandWorks, but keeps stdout — used to read `--version`
+function commandOutput(cmd: string, args: string[]): Promise<string | undefined> {
+  return new Promise(resolve => {
+    let child
+    try {
+      child = spawn(cmd, args, {stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000})
+    } catch {
+      resolve(undefined)
+      return
+    }
+    let out = ''
+    child.stdout.on('data', chunk => (out += chunk))
+    child.on('error', () => resolve(undefined))
+    child.on('close', code => resolve(code === 0 ? out.trim() || undefined : undefined))
+  })
+}
+
+/** Where yoinks keeps its own copy of yt-dlp — the only one it ever replaces. */
+export function managedYtDlpPath(): string {
+  return path.join(YOINKS_DIR, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp')
+}
+
+/** Fetch the standalone binary and swap it in atomically. */
+async function fetchYtDlp(dest: string, signal?: AbortSignal): Promise<void> {
+  await fs.mkdir(path.dirname(dest), {recursive: true})
+
+  const response = await fetch(`${RELEASE_BASE}/${ytDlpAssetName()}`, {signal})
+  if (!response.ok || !response.body) {
+    throw new Error(`Could not download yt-dlp (${response.status}). Check your connection and try again.`)
+  }
+
+  // write beside the target, then rename: a half-written binary is never
+  // visible under the real name, and a copy already running keeps its inode
+  const tmp = `${dest}.${process.pid}.download`
+  try {
+    await pipeline(Readable.fromWeb(response.body as never), createWriteStream(tmp), {signal})
+    await fs.chmod(tmp, 0o755)
+    await fs.rename(tmp, dest)
+  } catch (error) {
+    await fs.rm(tmp, {force: true})
+    throw error
+  }
+}
+
 /**
  * Resolve a usable yt-dlp binary: system install first, then a previously
  * downloaded copy, then download the standalone binary from GitHub releases.
@@ -39,23 +86,99 @@ function commandWorks(cmd: string, args: string[]): Promise<boolean> {
 export async function ensureYtDlp(onStatus: (message: string) => void, signal?: AbortSignal): Promise<string> {
   if (await commandWorks('yt-dlp', ['--version'])) return 'yt-dlp'
 
-  const local = path.join(YOINKS_DIR, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp')
+  const local = managedYtDlpPath()
   if (await commandWorks(local, ['--version'])) return local
 
   onStatus('first run: fetching yt-dlp…')
-  await fs.mkdir(YOINKS_DIR, {recursive: true})
+  await fetchYtDlp(local, signal)
+  return local
+}
 
-  const url = `${RELEASE_BASE}/${ytDlpAssetName()}`
-  const response = await fetch(url, {signal})
-  if (!response.ok || !response.body) {
-    throw new Error(`Could not download yt-dlp (${response.status}). Check your connection and try again.`)
+export type UpdateResult =
+  | {status: 'updated'; from?: string; to: string}
+  | {status: 'current'; version: string}
+  | {status: 'system'; version?: string}
+  | {status: 'unavailable'; reason: string}
+
+async function latestYtDlpVersion(signal?: AbortSignal): Promise<string | undefined> {
+  const response = await fetch(LATEST_RELEASE_API, {
+    signal,
+    headers: {accept: 'application/vnd.github+json', 'user-agent': 'yoinks'},
+  })
+  if (!response.ok) return undefined
+  const release = (await response.json()) as {tag_name?: unknown}
+  return typeof release.tag_name === 'string' ? release.tag_name.trim() || undefined : undefined
+}
+
+async function markUpdateChecked(version?: string): Promise<void> {
+  try {
+    await fs.mkdir(YOINKS_DIR, {recursive: true})
+    await fs.writeFile(UPDATE_STAMP, `${JSON.stringify({checkedAt: Date.now(), version: version ?? null})}\n`)
+  } catch {
+    // the stamp is an optimisation — worst case we check again next run
+  }
+}
+
+async function updateCheckDue(): Promise<boolean> {
+  try {
+    const stamp = JSON.parse(await fs.readFile(UPDATE_STAMP, 'utf8')) as {checkedAt?: unknown}
+    if (typeof stamp.checkedAt !== 'number') return true
+    return Date.now() - stamp.checkedAt > UPDATE_CHECK_INTERVAL_MS
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Refresh the copy of yt-dlp in ~/.yoinks/bin. A yt-dlp that came from the
+ * user's package manager is reported, never overwritten — that install isn't
+ * ours to touch.
+ */
+export async function updateYtDlp(signal?: AbortSignal): Promise<UpdateResult> {
+  if (await commandWorks('yt-dlp', ['--version'])) {
+    return {status: 'system', version: await commandOutput('yt-dlp', ['--version'])}
   }
 
-  const tmp = `${local}.download`
-  await pipeline(Readable.fromWeb(response.body as never), createWriteStream(tmp), {signal})
-  await fs.chmod(tmp, 0o755)
-  await fs.rename(tmp, local)
-  return local
+  const local = managedYtDlpPath()
+  const current = await commandOutput(local, ['--version'])
+
+  let latest: string | undefined
+  try {
+    latest = await latestYtDlpVersion(signal)
+  } catch (error) {
+    return {status: 'unavailable', reason: error instanceof Error ? error.message : String(error)}
+  }
+  if (!latest) return {status: 'unavailable', reason: 'could not reach the yt-dlp release feed'}
+
+  if (current && current === latest) {
+    await markUpdateChecked(latest)
+    return {status: 'current', version: current}
+  }
+
+  await fetchYtDlp(local, signal)
+  await markUpdateChecked(latest)
+  return {status: 'updated', from: current, to: latest}
+}
+
+/**
+ * Weekly background refresh, silent by design. A months-old yt-dlp is the
+ * usual reason downloads suddenly start failing, and the user can't act on a
+ * mid-session notice anyway. Returns a canceller — the caller aborts it on
+ * exit so a slow download can't keep the terminal hostage after quitting.
+ */
+export function autoUpdateYtDlp(): () => void {
+  const controller = new AbortController()
+  void (async () => {
+    try {
+      if (!(await updateCheckDue())) return
+      // never on first run: ensureYtDlp is about to fetch a fresh binary anyway
+      if (!(await commandWorks(managedYtDlpPath(), ['--version']))) return
+      await updateYtDlp(controller.signal)
+    } catch {
+      // offline, rate-limited, no disk space — yoinks runs on what it has
+    }
+  })()
+  return () => controller.abort()
 }
 
 /**
@@ -209,6 +332,11 @@ export type DownloadHandlers = {
   onProcessing: () => void
 }
 
+// YouTube and most HLS sites hand out fragmented media; pulling four
+// fragments at once is the single biggest speed win available here, and it
+// is a no-op for sites that serve one plain file
+const CONCURRENT_FRAGMENTS = '4'
+
 const PROGRESS_PREFIX = 'YOINK|'
 const PROGRESS_TEMPLATE = `${PROGRESS_PREFIX}%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s`
 
@@ -231,6 +359,8 @@ export function download(
   const args = [
     ...(opts.infoJsonPath ? ['--load-info-json', opts.infoJsonPath] : [opts.url]),
     ...opts.choice.args,
+    '--concurrent-fragments',
+    CONCURRENT_FRAGMENTS,
     '--no-playlist',
     '--no-warnings',
     '--newline',

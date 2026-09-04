@@ -15,6 +15,7 @@ import {clickTargetAt, findFrameRow, frameRowSpan, type ClickTarget} from './lib
 import {formatBytes, formatDuration, formatEta, formatSpeed, shortenPath, truncate, wrapText} from './lib/format.js'
 import {addToHistory, loadHistory} from './lib/history.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
+import {revealInFileManager} from './lib/reveal.js'
 import {useMouseClick} from './lib/use-mouse-click.js'
 import {nextThemeMode, ThemeProvider, type ThemeMode, useTheme} from './theme.js'
 import {
@@ -118,7 +119,10 @@ const HINTS: Record<Phase['name'], Array<[string, string]>> = {
     ['esc', 'cancel'],
     ['^c', 'quit'],
   ],
-  done: [['^c', 'quit']],
+  done: [
+    ['o', 'open folder'],
+    ['^c', 'quit'],
+  ],
   error: [
     ['↵', 'try again'],
     ['^c', 'quit'],
@@ -204,12 +208,19 @@ function AppContent({
     if (initialUrl) void startProbe(initialUrl)
   }, [initialUrl, startProbe])
 
+  const [revealFailed, setRevealFailed] = useState(false)
+
+  const openFolder = useCallback((filepath: string) => {
+    void revealInFileManager(filepath).then(opened => setRevealFailed(!opened))
+  }, [])
+
   const resetToInput = useCallback(() => {
     setUrl('')
     setUrlInput('')
     setPlatform(undefined)
     setInfo(undefined)
     setChoices([])
+    setRevealFailed(false)
     setPhase({name: 'input'})
   }, [])
 
@@ -223,6 +234,10 @@ function AppContent({
     (input, key) => {
       if (key.ctrl && input === 't') {
         cycleTheme()
+        return
+      }
+      if (input === 'o' && !key.ctrl && !key.meta && phase.name === 'done') {
+        openFolder(phase.filepath)
         return
       }
       if (key.escape && (phase.name === 'picking' || phase.name === 'error' || phase.name === 'done')) resetToInput()
@@ -293,6 +308,7 @@ function AppContent({
   const hintAction = (key: string): (() => void) | undefined => {
     if (key === '^c') return () => exit()
     if (key === '^t') return cycleTheme
+    if (key === 'o' && phase.name === 'done') return () => openFolder(phase.filepath)
     if (key === 'esc') return phase.name === 'probing' || phase.name === 'downloading' ? cancelRun : resetToInput
     if (key === '↵') {
       if (phase.name === 'input') return () => handleUrlSubmit(urlInput)
@@ -471,6 +487,9 @@ function AppContent({
             <Text color={theme.primary}>find your file in:</Text>
           </Text>
           <Text color={theme.gray} dimColor={theme.dimSecondary}>{shortenPath(phase.filepath, os.homedir(), 60)}</Text>
+          {revealFailed ? (
+            <Text color={theme.gray} dimColor={theme.dimSecondary}>✗ no file manager to open it with</Text>
+          ) : null}
           <Gap />
           <Box
             borderStyle="round"

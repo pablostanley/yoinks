@@ -35,6 +35,7 @@ automatically.
 $ yoinks https://youtu.be/dQw4w9WgXcQ    # straight to the format picker
 $ yoinks                                 # prompts for a url
 $ yoinks --theme light                   # force the light palette
+$ yoinks --update                        # refresh the bundled yt-dlp now
 ```
 
 yoinks takes over the terminal (full-screen, centered — and restores your
@@ -42,7 +43,9 @@ scrollback on exit). Pick a format with ↑/↓ (or j/k, or number keys) and
 hit enter. `esc` goes back, `^c` quits. Or just use the mouse — the yoink
 button, the format list and the footer hints are all clickable, and
 clicking the logo takes you back home. Files are saved to `~/Downloads`,
-and the file path is printed to your terminal when you're done.
+and the file path is printed to your terminal when you're done. On the
+finished screen, `o` opens the download in your file manager (Finder and
+Explorer highlight the file itself).
 
 The default `auto` theme uses your terminal's own foreground and background,
 so it follows light and dark terminal themes without guessing. Press `^t` or
@@ -57,6 +60,12 @@ click the theme control in the footer to cycle through `auto`, `light`, and
 - Powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp). On first run,
   yoinks downloads the standalone yt-dlp binary to `~/.yoinks/bin` —
   no Python required. If you already have yt-dlp installed, it uses yours.
+- That downloaded copy refreshes itself in the background roughly once a
+  week, because sites break old yt-dlp builds faster than anyone updates
+  them by hand. `yoinks --update` does it on demand. A yt-dlp you installed
+  yourself is never overwritten — update it however you installed it.
+- Fragmented streams (YouTube, HLS) are fetched four fragments at a time,
+  which gets around per-connection throttling.
 - ffmpeg (needed for merging high-res streams and mp3 extraction) is found
   on your PATH, with `ffmpeg-static` as a bundled fallback.
 - The UI is [Ink](https://github.com/vadimdemedes/ink) — React for the
@@ -81,7 +90,7 @@ To try it as a global command without publishing: `npm link`, then run
 - [ ] `-o <dir>` to choose the output folder
 - [ ] Playlist / thread-with-multiple-videos support
 - [ ] Clipboard detection: launch bare and auto-suggest the url you copied
-- [ ] Self-update for the bundled yt-dlp binary (`yt-dlp -U`)
+- [x] Self-update for the bundled yt-dlp binary
 - [x] Publish to npm (`npm i -g yoinks` / `npx yoinks`)
 - [ ] `curl yoinks.sh | sh` installer
 

@@ -6,6 +6,7 @@ import {captureFrames} from './lib/click-map.js'
 import {parseArgs} from './lib/args.js'
 import {readClipboard} from './lib/clipboard.js'
 import {isProbablyUrl} from './lib/platforms.js'
+import {autoUpdateYtDlp, updateYtDlp} from './lib/ytdlp.js'
 
 // read at runtime from the shipped package.json so npm version bumps
 // can't drift from a hardcoded constant
@@ -24,10 +25,12 @@ const HELP = `
 
   Options
     --theme <mode>  use auto, light, or dark for this run
+    --update        update the bundled yt-dlp now, then exit
     -h, --help      show this help
     -v, --version   show version
 
   Downloads are saved to ~/Downloads.
+  yt-dlp refreshes itself in the background about once a week.
   Powered by yt-dlp — YouTube, X, Instagram, Threads, TikTok & 1800+ sites.
 `
 
@@ -45,6 +48,26 @@ if (args.help) {
 
 if (args.version) {
   console.log(VERSION)
+  process.exit(0)
+}
+
+// plain stdout on purpose — an update is a one-shot chore, not a session
+if (args.update) {
+  console.log('yoinks: checking yt-dlp…')
+  const result = await updateYtDlp()
+  if (result.status === 'updated') {
+    console.log(`✓ yt-dlp updated${result.from ? `: ${result.from} → ${result.to}` : ` to ${result.to}`}`)
+  } else if (result.status === 'current') {
+    console.log(`✓ yt-dlp is already current (${result.version})`)
+  } else if (result.status === 'system') {
+    console.log(
+      `yoinks uses the yt-dlp already on your PATH${result.version ? ` (${result.version})` : ''} — ` +
+        'update it the way you installed it.',
+    )
+  } else {
+    console.error(`yoinks: could not check for updates — ${result.reason}`)
+    process.exit(1)
+  }
   process.exit(0)
 }
 
@@ -79,6 +102,10 @@ if (isTTY) {
   }
 }
 
+// a stale yt-dlp is the usual reason downloads start failing; keep it fresh
+// quietly while the user works
+const stopAutoUpdate = autoUpdateYtDlp()
+
 let outcome: Outcome = {}
 const {waitUntilExit} = render(
   <App
@@ -92,6 +119,10 @@ const {waitUntilExit} = render(
 )
 
 await waitUntilExit()
+
+// quitting must quit: an in-flight background update would otherwise hold
+// the process open on a restored terminal, looking like a hang
+stopAutoUpdate()
 
 if (isTTY) leaveAltScreen()
 if (outcome.filepath) {

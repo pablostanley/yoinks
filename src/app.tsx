@@ -133,6 +133,7 @@ type AppProps = {
   initialUrl?: string
   clipboardUrl?: string
   initialThemeMode?: ThemeMode
+  cookiesFrom?: string
   onOutcome: (outcome: Outcome) => void
 }
 
@@ -152,11 +153,13 @@ export function App({initialThemeMode = 'auto', ...props}: AppProps) {
 function AppContent({
   initialUrl,
   clipboardUrl,
+  cookiesFrom,
   onOutcome,
   cycleTheme,
 }: {
   initialUrl?: string
   clipboardUrl?: string
+  cookiesFrom?: string
   onOutcome: (outcome: Outcome) => void
   cycleTheme: () => void
 }) {
@@ -191,7 +194,7 @@ function AppContent({
       ytdlpRef.current = ytdlp
       if (controller.signal.aborted) return
       setPhase({name: 'probing', status: 'fetching video info…'})
-      const {info: videoInfo, infoJsonPath} = await probe(ytdlp, targetUrl, controller.signal)
+      const {info: videoInfo, infoJsonPath} = await probe(ytdlp, targetUrl, {cookiesFrom}, controller.signal)
       if (controller.signal.aborted) return
       infoJsonRef.current = infoJsonPath
       setInfo(videoInfo)
@@ -202,7 +205,7 @@ function AppContent({
       if (controller.signal.aborted) return
       setPhase({name: 'error', message: error instanceof Error ? error.message : String(error)})
     }
-  }, [])
+  }, [cookiesFrom])
 
   useEffect(() => {
     if (initialUrl) void startProbe(initialUrl)
@@ -274,7 +277,7 @@ function AppContent({
       }
       try {
         const ffmpegLocation = await findFfmpeg()
-        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, outDir: OUT_DIR}
+        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, cookiesFrom, outDir: OUT_DIR}
         let filepath: string
         try {
           // reuse the probe's metadata — starts immediately instead of re-extracting
@@ -522,6 +525,10 @@ function AppContent({
                   </Text>
                   <Text color={theme.gray} dimColor={theme.dimSecondary}> {phase.status}</Text>
                 </Text>
+              ) : phase.name === 'input' && cookiesFrom ? (
+                // a remembered --cookies setting is silent otherwise, and
+                // "why is it logged in as me?" deserves an answer on screen
+                <Text color={theme.gray} dimColor={theme.dimSecondary}>cookies: {cookiesFrom}</Text>
               ) : undefined
             }
           />

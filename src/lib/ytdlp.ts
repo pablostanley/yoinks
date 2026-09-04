@@ -226,9 +226,24 @@ export type ProbeResult = {
   infoJsonPath: string
 }
 
-export async function probe(ytdlp: string, url: string, signal?: AbortSignal): Promise<ProbeResult> {
+/**
+ * Borrow the browser's cookies so private, age-gated and login-walled pages
+ * (Instagram in particular) work at all. Empty when no browser is configured.
+ */
+function cookieArgs(cookiesFrom?: string): string[] {
+  return cookiesFrom ? ['--cookies-from-browser', cookiesFrom] : []
+}
+
+export async function probe(
+  ytdlp: string,
+  url: string,
+  opts: {cookiesFrom?: string} = {},
+  signal?: AbortSignal,
+): Promise<ProbeResult> {
   const stdout = await new Promise<string>((resolve, reject) => {
-    const child = spawn(ytdlp, ['-J', '--no-playlist', '--no-warnings', url], {signal})
+    const child = spawn(ytdlp, ['-J', '--no-playlist', '--no-warnings', ...cookieArgs(opts.cookiesFrom), url], {
+      signal,
+    })
     let out = ''
     let stderr = ''
     child.stdout.on('data', chunk => (out += chunk))
@@ -350,6 +365,7 @@ export function download(
     url: string
     /** When set, reuse the probe's metadata instead of re-extracting — starts much faster. */
     infoJsonPath?: string
+    cookiesFrom?: string
     choice: DownloadChoice
     outDir: string
   },
@@ -359,6 +375,7 @@ export function download(
   const args = [
     ...(opts.infoJsonPath ? ['--load-info-json', opts.infoJsonPath] : [opts.url]),
     ...opts.choice.args,
+    ...cookieArgs(opts.cookiesFrom),
     '--concurrent-fragments',
     CONCURRENT_FRAGMENTS,
     '--no-playlist',

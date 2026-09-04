@@ -23,6 +23,19 @@ test('parses an equals-style theme option after the url', () => {
   })
 })
 
+test('accepts a browser for --cookies in both spellings, and “none” to forget it', () => {
+  assert.equal(parseArgs(['--cookies', 'firefox']).cookiesFrom, 'firefox')
+  assert.equal(parseArgs(['--cookies=Chrome']).cookiesFrom, 'chrome')
+  assert.equal(parseArgs(['--cookies', 'none']).cookiesFrom, 'none')
+  assert.equal(parseArgs(['https://example.com/video']).cookiesFrom, undefined)
+})
+
+test('rejects a browser yt-dlp cannot read cookies from', () => {
+  assert.match(parseArgs(['--cookies']).error ?? '', /needs a browser/)
+  assert.match(parseArgs(['--cookies', 'netscape']).error ?? '', /can’t read cookies/)
+  assert.match(parseArgs(['--cookies=']).error ?? '', /can’t read cookies/)
+})
+
 test('takes --update as a standalone chore, with or without a url', () => {
   assert.equal(parseArgs(['--update']).update, true)
   assert.equal(parseArgs([]).update, false)

@@ -36,7 +36,17 @@ $ yoinks https://youtu.be/dQw4w9WgXcQ    # straight to the format picker
 $ yoinks                                 # prompts for a url
 $ yoinks --theme light                   # force the light palette
 $ yoinks --update                        # refresh the bundled yt-dlp now
+$ yoinks --cookies firefox                # sign in with your browser's cookies
 ```
+
+Some links need you to be logged in: private accounts, stories, anything
+age-gated, and — more and more often — ordinary Instagram posts. Point
+yoinks at a browser you're signed into with `--cookies firefox` (or
+`chrome`, `brave`, `edge`, `safari`, …) and yt-dlp borrows that browser's
+cookies. The choice is remembered, so it's a one-time setup; the footer
+shows which browser is in use, and `--cookies none` forgets it. Chrome on
+macOS and Windows encrypts its cookie store, so Firefox is the more
+reliable pick there.
 
 yoinks takes over the terminal (full-screen, centered — and restores your
 scrollback on exit). Pick a format with ↑/↓ (or j/k, or number keys) and

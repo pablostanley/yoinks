@@ -1,4 +1,5 @@
 import {isThemeMode, type ThemeMode} from '../theme.js'
+import {COOKIE_BROWSERS, isCookieBrowser, type CookieBrowser} from './config.js'
 
 export type CliArgs = {
   help: boolean
@@ -6,7 +7,18 @@ export type CliArgs = {
   update: boolean
   initialUrl?: string
   themeMode?: ThemeMode
+  /** A browser name, or 'none' to forget the remembered one. */
+  cookiesFrom?: CookieBrowser | 'none'
   error?: string
+}
+
+const COOKIE_VALUES = `${COOKIE_BROWSERS.join(', ')}, or none`
+
+function readCookiesValue(value: string | undefined): CookieBrowser | 'none' | undefined {
+  if (!value) return undefined
+  const normalized = value.toLowerCase()
+  if (normalized === 'none' || normalized === 'off') return 'none'
+  return isCookieBrowser(normalized) ? normalized : undefined
 }
 
 export function parseArgs(args: string[]): CliArgs {
@@ -21,6 +33,17 @@ export function parseArgs(args: string[]): CliArgs {
       result.version = true
     } else if (arg === '--update') {
       result.update = true
+    } else if (arg === '--cookies') {
+      const value = args[++index]
+      if (!value) return {...result, error: `--cookies needs a browser: ${COOKIE_VALUES}`}
+      const parsed = readCookiesValue(value)
+      if (!parsed) return {...result, error: `can’t read cookies from “${value}” — use ${COOKIE_VALUES}`}
+      result.cookiesFrom = parsed
+    } else if (arg.startsWith('--cookies=')) {
+      const value = arg.slice('--cookies='.length)
+      const parsed = readCookiesValue(value)
+      if (!parsed) return {...result, error: `can’t read cookies from “${value}” — use ${COOKIE_VALUES}`}
+      result.cookiesFrom = parsed
     } else if (arg === '--theme') {
       const value = args[++index]
       if (!value) return {...result, error: '--theme needs a value: auto, light, or dark'}

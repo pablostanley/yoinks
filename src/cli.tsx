@@ -5,6 +5,7 @@ import {App, type Outcome} from './app.js'
 import {captureFrames} from './lib/click-map.js'
 import {parseArgs} from './lib/args.js'
 import {readClipboard} from './lib/clipboard.js'
+import {loadConfig, saveConfig} from './lib/config.js'
 import {isProbablyUrl} from './lib/platforms.js'
 import {autoUpdateYtDlp, updateYtDlp} from './lib/ytdlp.js'
 
@@ -24,13 +25,17 @@ const HELP = `
     $ yoinks                 (prompts for a url)
 
   Options
-    --theme <mode>  use auto, light, or dark for this run
-    --update        update the bundled yt-dlp now, then exit
-    -h, --help      show this help
-    -v, --version   show version
+    --cookies <browser>  sign in using that browser's cookies, and remember
+                         it (firefox, chrome, brave, edge, safari, …).
+                         --cookies none forgets it again
+    --theme <mode>       use auto, light, or dark for this run
+    --update             update the bundled yt-dlp now, then exit
+    -h, --help           show this help
+    -v, --version        show version
 
   Downloads are saved to ~/Downloads.
   yt-dlp refreshes itself in the background about once a week.
+  Private, age-gated and most Instagram links need --cookies.
   Powered by yt-dlp — YouTube, X, Instagram, Threads, TikTok & 1800+ sites.
 `
 
@@ -74,6 +79,15 @@ if (args.update) {
 const initialUrl = args.initialUrl
 const initialThemeMode = args.themeMode ?? 'auto'
 
+// --cookies is sticky: sites that need a login need it every time, and
+// nobody wants to retype it. `--cookies none` clears the memory.
+const config = loadConfig()
+if (args.cookiesFrom) {
+  const cookiesFrom = args.cookiesFrom === 'none' ? undefined : args.cookiesFrom
+  if (cookiesFrom !== config.cookiesFrom) saveConfig({...config, cookiesFrom})
+  config.cookiesFrom = cookiesFrom
+}
+
 const isTTY = Boolean(process.stdout.isTTY)
 
 // no url given — offer the clipboard url (⇥ to paste) when it already holds one
@@ -112,6 +126,7 @@ const {waitUntilExit} = render(
     initialUrl={initialUrl}
     clipboardUrl={clipboardUrl}
     initialThemeMode={initialThemeMode}
+    cookiesFrom={config.cookiesFrom}
     onOutcome={result => (outcome = result)}
   />,
   // keep a copy of every frame so clicks can be hit-tested against it

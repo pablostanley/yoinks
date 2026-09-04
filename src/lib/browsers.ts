@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type {CookieBrowser} from './config.js'
+import {detectPlatform} from './platforms.js'
 
 /**
  * Where each browser keeps its profile, per platform. Presence of the folder
@@ -61,6 +62,26 @@ function profileCandidates(): Array<[CookieBrowser, string[]]> {
     ['vivaldi', [path.join(config, 'vivaldi')]],
     ['opera', [path.join(config, 'opera')]],
   ]
+}
+
+/**
+ * The cookies we actually hand yt-dlp for one link.
+ *
+ * YouTube is the exception. It rotates the cookies of a signed-in session
+ * constantly, so the jar of a running browser is usually stale by the time
+ * yt-dlp reads it, and the player answers “The page needs to be reloaded”
+ * for a video that downloads fine signed out. yt-dlp warns against feeding
+ * it YouTube account cookies for that reason too. So a browser *we* guessed
+ * stays out of YouTube's way, while a browser pinned with --cookies is still
+ * used — that one is a deliberate choice for links that need an account.
+ */
+export function cookiesForUrl(
+  cookiesFrom: string | undefined,
+  guessed: boolean | undefined,
+  url: string,
+): string | undefined {
+  if (!cookiesFrom) return undefined
+  return guessed && detectPlatform(url).key === 'youtube' ? undefined : cookiesFrom
 }
 
 /** First installed browser we can borrow cookies from, if any. */

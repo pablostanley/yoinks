@@ -28,9 +28,10 @@ const HELP = `
   Options
     --cookies <browser>  sign in using that browser's cookies (firefox,
                          chrome, brave, edge, safari, …). By default yoinks
-                         picks an installed browser itself; --cookies none
-                         stays signed out, --cookies auto restores picking.
-                         Whatever you choose is remembered
+                         picks an installed browser itself — never for
+                         YouTube, which rejects borrowed cookies.
+                         --cookies none stays signed out, --cookies auto
+                         restores picking. Whatever you choose is remembered
     --theme <mode>       use auto, light, or dark for this run
     --update             update the bundled yt-dlp now, then exit
     -h, --help           show this help

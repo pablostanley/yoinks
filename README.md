@@ -44,8 +44,16 @@ age-gated, and — more and more often — ordinary Instagram posts. So yoinks
 signs in as you by default: it finds an installed browser (Firefox first,
 since Chromium browsers encrypt their cookie store on macOS and Windows)
 and lets yt-dlp borrow its cookies. The footer names the browser in use.
-If those cookies turn out to be unreadable — locked profile, encrypted
-store — it quietly carries on signed out rather than failing the download.
+If borrowed cookies turn out to be unusable — locked profile, encrypted
+store, a site that rejects them — it quietly carries on signed out rather
+than failing the download.
+
+YouTube is the one exception: automatic sign-in skips it. YouTube rotates
+the cookies of a signed-in session constantly, so a running browser's jar
+is usually stale by the time yt-dlp reads it, and the player answers
+“The page needs to be reloaded” for a video that downloads fine signed
+out. Pinning a browser with `--cookies firefox` still covers YouTube —
+that one is a deliberate choice, and age-gated videos need it.
 
 Use `--cookies firefox` (or `chrome`, `brave`, `edge`, `safari`, …) to pin
 a specific browser, `--cookies none` to stay signed out, and

@@ -14,6 +14,7 @@ import {TextInput} from './components/text-input.js'
 import {clickTargetAt, findFrameRow, frameRowSpan, type ClickTarget} from './lib/click-map.js'
 import {formatBytes, formatDuration, formatEta, formatSpeed, shortenPath, truncate, wrapText} from './lib/format.js'
 import {addToHistory, loadHistory} from './lib/history.js'
+import {cookiesForUrl} from './lib/browsers.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
 import {revealInFileManager} from './lib/reveal.js'
 import {useMouseClick} from './lib/use-mouse-click.js'
@@ -184,6 +185,9 @@ function AppContent({
   const ytdlpRef = useRef('')
   // cookies for this session: dropped for good once they prove unusable
   const cookiesRef = useRef(cookiesFrom)
+  // …and the ones the current link actually went out with, so the download
+  // repeats exactly what the probe got away with
+  const usedCookiesRef = useRef<string | undefined>(undefined)
   const [activeCookies, setActiveCookies] = useState(cookiesFrom)
   const highlightRef = useRef(0) // choice under the cursor, for the ↵ hint click
   const infoJsonRef = useRef<string | undefined>(undefined)
@@ -206,15 +210,24 @@ function AppContent({
       ytdlpRef.current = ytdlp
       if (controller.signal.aborted) return
       setPhase({name: 'probing', status: 'fetching video info…'})
+      // cookies a browser we guessed may be locked, encrypted, or simply
+      // unwelcome on this site — never let them cost a link that works
+      // signed out anyway
+      const wanted = cookiesForUrl(cookiesRef.current, cookiesAuto, targetUrl)
+      usedCookiesRef.current = wanted
       let result
       try {
-        result = await probe(ytdlp, targetUrl, {cookiesFrom: cookiesRef.current}, controller.signal)
+        result = await probe(ytdlp, targetUrl, {cookiesFrom: wanted}, controller.signal)
       } catch (error) {
-        // a browser we picked ourselves may keep its cookies locked or
-        // encrypted — no reason to fail a link that works signed out anyway
-        if (!cookiesAuto || !cookiesRef.current || controller.signal.aborted || !isCookieProblem(error)) throw error
-        cookiesRef.current = undefined
-        setActiveCookies(undefined)
+        if (!cookiesAuto || !wanted || controller.signal.aborted) throw error
+        // an unreadable cookie store stays unreadable: stop asking for the
+        // rest of the session. Any other failure only retires the cookies
+        // for this one link
+        if (isCookieProblem(error)) {
+          cookiesRef.current = undefined
+          setActiveCookies(undefined)
+        }
+        usedCookiesRef.current = undefined
         result = await probe(ytdlp, targetUrl, {}, controller.signal)
       }
       const {info: videoInfo, infoJsonPath} = result
@@ -305,7 +318,7 @@ function AppContent({
           ffmpegLocation,
           url,
           choice,
-          cookiesFrom: cookiesRef.current,
+          cookiesFrom: usedCookiesRef.current,
           outDir: OUT_DIR,
         }
         let filepath: string

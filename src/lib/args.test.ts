@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {parseArgs} from './args.js'
+import {detectCookieBrowser} from './browsers.js'
 import {isThemeMode, nextThemeMode, themeFor} from '../theme.js'
 
 test('parses a url and a spaced theme option without confusing the value for the url', () => {
@@ -23,11 +24,23 @@ test('parses an equals-style theme option after the url', () => {
   })
 })
 
-test('accepts a browser for --cookies in both spellings, and “none” to forget it', () => {
+test('accepts a browser for --cookies in both spellings, plus none and auto', () => {
   assert.equal(parseArgs(['--cookies', 'firefox']).cookiesFrom, 'firefox')
   assert.equal(parseArgs(['--cookies=Chrome']).cookiesFrom, 'chrome')
   assert.equal(parseArgs(['--cookies', 'none']).cookiesFrom, 'none')
+  assert.equal(parseArgs(['--cookies', 'auto']).cookiesFrom, 'auto')
   assert.equal(parseArgs(['https://example.com/video']).cookiesFrom, undefined)
+})
+
+test('picks an installed browser, prefers firefox, and gives up quietly on a bare machine', () => {
+  const dirs = (browser: string) => (dir: string) => dir.toLowerCase().includes(browser)
+  assert.equal(detectCookieBrowser(dirs('firefox')), 'firefox')
+  assert.equal(detectCookieBrowser(dirs('chrome')), 'chrome')
+  assert.equal(detectCookieBrowser(dirs('vivaldi')), 'vivaldi')
+  // firefox wins when several are installed: chromium cookie stores are
+  // encrypted on macOS and Windows
+  assert.equal(detectCookieBrowser(dir => /firefox|chrome/i.test(dir)), 'firefox')
+  assert.equal(detectCookieBrowser(() => false), undefined)
 })
 
 test('rejects a browser yt-dlp cannot read cookies from', () => {

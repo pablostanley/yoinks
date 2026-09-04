@@ -24,8 +24,11 @@ export function isCookieBrowser(value: string): value is CookieBrowser {
 }
 
 export type Config = {
-  /** Browser to borrow cookies from; unset means anonymous downloads. */
-  cookiesFrom?: CookieBrowser
+  /**
+   * Browser to borrow cookies from. A browser name pins that one, 'off' means
+   * stay signed out, and unset means "figure it out" — see detectCookieBrowser.
+   */
+  cookiesFrom?: CookieBrowser | 'off'
 }
 
 export function loadConfig(): Config {
@@ -33,6 +36,7 @@ export function loadConfig(): Config {
     const parsed: unknown = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
     if (!parsed || typeof parsed !== 'object') return {}
     const {cookiesFrom} = parsed as {cookiesFrom?: unknown}
+    if (cookiesFrom === 'off') return {cookiesFrom: 'off'}
     return typeof cookiesFrom === 'string' && isCookieBrowser(cookiesFrom) ? {cookiesFrom} : {}
   } catch {
     return {}

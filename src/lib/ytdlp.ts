@@ -1,5 +1,5 @@
 import {spawn, type ChildProcess} from 'node:child_process'
-import {createWriteStream} from 'node:fs'
+import {createWriteStream, rmSync} from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -265,9 +265,49 @@ export async function probe(
     throw new Error('Could not parse video info from yt-dlp.')
   }
 
-  const infoJsonPath = path.join(os.tmpdir(), `yoinks-info-${process.pid}-${Date.now()}.json`)
+  const infoJsonPath = path.join(os.tmpdir(), `${INFO_PREFIX}${process.pid}-${Date.now()}.json`)
   await fs.writeFile(infoJsonPath, stdout)
+  infoJsonFiles.add(infoJsonPath)
   return {info, infoJsonPath}
+}
+
+const INFO_PREFIX = 'yoinks-info-'
+
+// metadata dumps are only useful for the run that made them; keep track and
+// take them with us on the way out instead of silting up /tmp
+const infoJsonFiles = new Set<string>()
+process.on('exit', () => {
+  for (const file of infoJsonFiles) {
+    try {
+      rmSync(file, {force: true})
+    } catch {
+      // nothing sensible to do while exiting
+    }
+  }
+})
+
+/** Clear out dumps left by runs that were killed before they could tidy up. */
+export async function sweepStaleInfoFiles(maxAgeMs = 24 * 60 * 60 * 1000): Promise<void> {
+  try {
+    const dir = os.tmpdir()
+    const names = await fs.readdir(dir)
+    const cutoff = Date.now() - maxAgeMs
+    await Promise.all(
+      names
+        .filter(name => name.startsWith(INFO_PREFIX) && name.endsWith('.json'))
+        .map(async name => {
+          const file = path.join(dir, name)
+          try {
+            const stat = await fs.stat(file)
+            if (stat.mtimeMs < cutoff) await fs.rm(file, {force: true})
+          } catch {
+            // someone else's file, or already gone
+          }
+        }),
+    )
+  } catch {
+    // no readable temp dir — not worth a word to the user
+  }
 }
 
 export type DownloadChoice = {

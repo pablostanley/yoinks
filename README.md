@@ -36,17 +36,21 @@ $ yoinks https://youtu.be/dQw4w9WgXcQ    # straight to the format picker
 $ yoinks                                 # prompts for a url
 $ yoinks --theme light                   # force the light palette
 $ yoinks --update                        # refresh the bundled yt-dlp now
-$ yoinks --cookies firefox                # sign in with your browser's cookies
+$ yoinks --cookies none                  # download signed out
 ```
 
 Some links need you to be logged in: private accounts, stories, anything
-age-gated, and — more and more often — ordinary Instagram posts. Point
-yoinks at a browser you're signed into with `--cookies firefox` (or
-`chrome`, `brave`, `edge`, `safari`, …) and yt-dlp borrows that browser's
-cookies. The choice is remembered, so it's a one-time setup; the footer
-shows which browser is in use, and `--cookies none` forgets it. Chrome on
-macOS and Windows encrypts its cookie store, so Firefox is the more
-reliable pick there.
+age-gated, and — more and more often — ordinary Instagram posts. So yoinks
+signs in as you by default: it finds an installed browser (Firefox first,
+since Chromium browsers encrypt their cookie store on macOS and Windows)
+and lets yt-dlp borrow its cookies. The footer names the browser in use.
+If those cookies turn out to be unreadable — locked profile, encrypted
+store — it quietly carries on signed out rather than failing the download.
+
+Use `--cookies firefox` (or `chrome`, `brave`, `edge`, `safari`, …) to pin
+a specific browser, `--cookies none` to stay signed out, and
+`--cookies auto` to go back to picking automatically. Whatever you choose
+is remembered in `~/.config/yoinks/config.json`.
 
 yoinks takes over the terminal (full-screen, centered — and restores your
 scrollback on exit). Pick a format with ↑/↓ (or j/k, or number keys) and

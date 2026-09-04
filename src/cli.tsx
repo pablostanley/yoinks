@@ -5,9 +5,10 @@ import {App, type Outcome} from './app.js'
 import {captureFrames} from './lib/click-map.js'
 import {parseArgs} from './lib/args.js'
 import {readClipboard} from './lib/clipboard.js'
+import {detectCookieBrowser} from './lib/browsers.js'
 import {loadConfig, saveConfig} from './lib/config.js'
 import {isProbablyUrl} from './lib/platforms.js'
-import {autoUpdateYtDlp, updateYtDlp} from './lib/ytdlp.js'
+import {autoUpdateYtDlp, sweepStaleInfoFiles, updateYtDlp} from './lib/ytdlp.js'
 
 // read at runtime from the shipped package.json so npm version bumps
 // can't drift from a hardcoded constant
@@ -25,9 +26,11 @@ const HELP = `
     $ yoinks                 (prompts for a url)
 
   Options
-    --cookies <browser>  sign in using that browser's cookies, and remember
-                         it (firefox, chrome, brave, edge, safari, …).
-                         --cookies none forgets it again
+    --cookies <browser>  sign in using that browser's cookies (firefox,
+                         chrome, brave, edge, safari, …). By default yoinks
+                         picks an installed browser itself; --cookies none
+                         stays signed out, --cookies auto restores picking.
+                         Whatever you choose is remembered
     --theme <mode>       use auto, light, or dark for this run
     --update             update the bundled yt-dlp now, then exit
     -h, --help           show this help
@@ -79,14 +82,21 @@ if (args.update) {
 const initialUrl = args.initialUrl
 const initialThemeMode = args.themeMode ?? 'auto'
 
-// --cookies is sticky: sites that need a login need it every time, and
-// nobody wants to retype it. `--cookies none` clears the memory.
+// Cookies are on by default: without them Instagram, private and age-gated
+// links simply fail, and the browser is right there. `--cookies <browser>`
+// pins one, `--cookies none` stays signed out, `--cookies auto` goes back to
+// picking automatically — all three are remembered.
 const config = loadConfig()
 if (args.cookiesFrom) {
-  const cookiesFrom = args.cookiesFrom === 'none' ? undefined : args.cookiesFrom
-  if (cookiesFrom !== config.cookiesFrom) saveConfig({...config, cookiesFrom})
-  config.cookiesFrom = cookiesFrom
+  const stored = args.cookiesFrom === 'none' ? 'off' : args.cookiesFrom === 'auto' ? undefined : args.cookiesFrom
+  saveConfig({...config, cookiesFrom: stored})
+  config.cookiesFrom = stored
 }
+// an auto-picked browser may not hold usable cookies — the app falls back to
+// signed-out rather than failing a download over it
+const cookiesAuto = config.cookiesFrom === undefined
+const cookiesFrom =
+  config.cookiesFrom === 'off' ? undefined : cookiesAuto ? detectCookieBrowser() : config.cookiesFrom
 
 const isTTY = Boolean(process.stdout.isTTY)
 
@@ -119,6 +129,7 @@ if (isTTY) {
 // a stale yt-dlp is the usual reason downloads start failing; keep it fresh
 // quietly while the user works
 const stopAutoUpdate = autoUpdateYtDlp()
+void sweepStaleInfoFiles()
 
 let outcome: Outcome = {}
 const {waitUntilExit} = render(
@@ -126,7 +137,8 @@ const {waitUntilExit} = render(
     initialUrl={initialUrl}
     clipboardUrl={clipboardUrl}
     initialThemeMode={initialThemeMode}
-    cookiesFrom={config.cookiesFrom}
+    cookiesFrom={cookiesFrom}
+    cookiesAuto={cookiesAuto}
     onOutcome={result => (outcome = result)}
   />,
   // keep a copy of every frame so clicks can be hit-tested against it

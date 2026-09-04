@@ -7,17 +7,21 @@ export type CliArgs = {
   update: boolean
   initialUrl?: string
   themeMode?: ThemeMode
-  /** A browser name, or 'none' to forget the remembered one. */
-  cookiesFrom?: CookieBrowser | 'none'
+  /**
+   * A browser name pins it, 'none' stays signed out, 'auto' goes back to
+   * picking an installed browser by itself.
+   */
+  cookiesFrom?: CookieBrowser | 'none' | 'auto'
   error?: string
 }
 
-const COOKIE_VALUES = `${COOKIE_BROWSERS.join(', ')}, or none`
+const COOKIE_VALUES = `${COOKIE_BROWSERS.join(', ')}, auto, or none`
 
-function readCookiesValue(value: string | undefined): CookieBrowser | 'none' | undefined {
+function readCookiesValue(value: string | undefined): CookieBrowser | 'none' | 'auto' | undefined {
   if (!value) return undefined
   const normalized = value.toLowerCase()
   if (normalized === 'none' || normalized === 'off') return 'none'
+  if (normalized === 'auto') return 'auto'
   return isCookieBrowser(normalized) ? normalized : undefined
 }
 

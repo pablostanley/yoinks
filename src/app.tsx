@@ -134,8 +134,15 @@ type AppProps = {
   clipboardUrl?: string
   initialThemeMode?: ThemeMode
   cookiesFrom?: string
+  /** True when the browser was guessed rather than chosen — see cli.tsx. */
+  cookiesAuto?: boolean
   onOutcome: (outcome: Outcome) => void
 }
+
+// yt-dlp says things like "could not find firefox cookies database in …" or
+// "failed to decrypt with DPAPI"; all of them name the cookies
+const isCookieProblem = (error: unknown) =>
+  /cookie/i.test(error instanceof Error ? error.message : String(error))
 
 export function App({initialThemeMode = 'auto', ...props}: AppProps) {
   const [themeMode, setThemeMode] = useState(initialThemeMode)
@@ -154,12 +161,14 @@ function AppContent({
   initialUrl,
   clipboardUrl,
   cookiesFrom,
+  cookiesAuto,
   onOutcome,
   cycleTheme,
 }: {
   initialUrl?: string
   clipboardUrl?: string
   cookiesFrom?: string
+  cookiesAuto?: boolean
   onOutcome: (outcome: Outcome) => void
   cycleTheme: () => void
 }) {
@@ -173,6 +182,9 @@ function AppContent({
   const [info, setInfo] = useState<VideoInfo>()
   const [choices, setChoices] = useState<DownloadChoice[]>([])
   const ytdlpRef = useRef('')
+  // cookies for this session: dropped for good once they prove unusable
+  const cookiesRef = useRef(cookiesFrom)
+  const [activeCookies, setActiveCookies] = useState(cookiesFrom)
   const highlightRef = useRef(0) // choice under the cursor, for the ↵ hint click
   const infoJsonRef = useRef<string | undefined>(undefined)
   const abortRef = useRef<AbortController | undefined>(undefined)
@@ -194,7 +206,18 @@ function AppContent({
       ytdlpRef.current = ytdlp
       if (controller.signal.aborted) return
       setPhase({name: 'probing', status: 'fetching video info…'})
-      const {info: videoInfo, infoJsonPath} = await probe(ytdlp, targetUrl, {cookiesFrom}, controller.signal)
+      let result
+      try {
+        result = await probe(ytdlp, targetUrl, {cookiesFrom: cookiesRef.current}, controller.signal)
+      } catch (error) {
+        // a browser we picked ourselves may keep its cookies locked or
+        // encrypted — no reason to fail a link that works signed out anyway
+        if (!cookiesAuto || !cookiesRef.current || controller.signal.aborted || !isCookieProblem(error)) throw error
+        cookiesRef.current = undefined
+        setActiveCookies(undefined)
+        result = await probe(ytdlp, targetUrl, {}, controller.signal)
+      }
+      const {info: videoInfo, infoJsonPath} = result
       if (controller.signal.aborted) return
       infoJsonRef.current = infoJsonPath
       setInfo(videoInfo)
@@ -205,7 +228,7 @@ function AppContent({
       if (controller.signal.aborted) return
       setPhase({name: 'error', message: error instanceof Error ? error.message : String(error)})
     }
-  }, [cookiesFrom])
+  }, [cookiesAuto])
 
   useEffect(() => {
     if (initialUrl) void startProbe(initialUrl)
@@ -277,7 +300,14 @@ function AppContent({
       }
       try {
         const ffmpegLocation = await findFfmpeg()
-        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, cookiesFrom, outDir: OUT_DIR}
+        const base = {
+          ytdlp: ytdlpRef.current,
+          ffmpegLocation,
+          url,
+          choice,
+          cookiesFrom: cookiesRef.current,
+          outDir: OUT_DIR,
+        }
         let filepath: string
         try {
           // reuse the probe's metadata — starts immediately instead of re-extracting
@@ -525,10 +555,10 @@ function AppContent({
                   </Text>
                   <Text color={theme.gray} dimColor={theme.dimSecondary}> {phase.status}</Text>
                 </Text>
-              ) : phase.name === 'input' && cookiesFrom ? (
+              ) : phase.name === 'input' && activeCookies ? (
                 // a remembered --cookies setting is silent otherwise, and
                 // "why is it logged in as me?" deserves an answer on screen
-                <Text color={theme.gray} dimColor={theme.dimSecondary}>cookies: {cookiesFrom}</Text>
+                <Text color={theme.gray} dimColor={theme.dimSecondary}>cookies: {activeCookies}</Text>
               ) : undefined
             }
           />

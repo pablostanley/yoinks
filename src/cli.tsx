@@ -5,7 +5,10 @@ import {App, type Outcome} from './app.js'
 import {captureFrames} from './lib/click-map.js'
 import {parseArgs} from './lib/args.js'
 import {readClipboard} from './lib/clipboard.js'
+import {detectCookieBrowser} from './lib/browsers.js'
+import {loadConfig, saveConfig} from './lib/config.js'
 import {isProbablyUrl} from './lib/platforms.js'
+import {autoUpdateYtDlp, sweepStaleInfoFiles, updateYtDlp} from './lib/ytdlp.js'
 
 // read at runtime from the shipped package.json so npm version bumps
 // can't drift from a hardcoded constant
@@ -23,11 +26,20 @@ const HELP = `
     $ yoinks                 (prompts for a url)
 
   Options
-    --theme <mode>  use auto, light, or dark for this run
-    -h, --help      show this help
-    -v, --version   show version
+    --cookies <browser>  sign in using that browser's cookies (firefox,
+                         chrome, brave, edge, safari, …). By default yoinks
+                         picks an installed browser itself — never for
+                         YouTube, which rejects borrowed cookies.
+                         --cookies none stays signed out, --cookies auto
+                         restores picking. Whatever you choose is remembered
+    --theme <mode>       use auto, light, or dark for this run
+    --update             update the bundled yt-dlp now, then exit
+    -h, --help           show this help
+    -v, --version        show version
 
   Downloads are saved to ~/Downloads.
+  yt-dlp refreshes itself in the background about once a week.
+  Private, age-gated and most Instagram links need --cookies.
   Powered by yt-dlp — YouTube, X, Instagram, Threads, TikTok & 1800+ sites.
 `
 
@@ -48,8 +60,44 @@ if (args.version) {
   process.exit(0)
 }
 
+// plain stdout on purpose — an update is a one-shot chore, not a session
+if (args.update) {
+  console.log('yoinks: checking yt-dlp…')
+  const result = await updateYtDlp()
+  if (result.status === 'updated') {
+    console.log(`✓ yt-dlp updated${result.from ? `: ${result.from} → ${result.to}` : ` to ${result.to}`}`)
+  } else if (result.status === 'current') {
+    console.log(`✓ yt-dlp is already current (${result.version})`)
+  } else if (result.status === 'system') {
+    console.log(
+      `yoinks uses the yt-dlp already on your PATH${result.version ? ` (${result.version})` : ''} — ` +
+        'update it the way you installed it.',
+    )
+  } else {
+    console.error(`yoinks: could not check for updates — ${result.reason}`)
+    process.exit(1)
+  }
+  process.exit(0)
+}
+
 const initialUrl = args.initialUrl
 const initialThemeMode = args.themeMode ?? 'auto'
+
+// Cookies are on by default: without them Instagram, private and age-gated
+// links simply fail, and the browser is right there. `--cookies <browser>`
+// pins one, `--cookies none` stays signed out, `--cookies auto` goes back to
+// picking automatically — all three are remembered.
+const config = loadConfig()
+if (args.cookiesFrom) {
+  const stored = args.cookiesFrom === 'none' ? 'off' : args.cookiesFrom === 'auto' ? undefined : args.cookiesFrom
+  saveConfig({...config, cookiesFrom: stored})
+  config.cookiesFrom = stored
+}
+// an auto-picked browser may not hold usable cookies — the app falls back to
+// signed-out rather than failing a download over it
+const cookiesAuto = config.cookiesFrom === undefined
+const cookiesFrom =
+  config.cookiesFrom === 'off' ? undefined : cookiesAuto ? detectCookieBrowser() : config.cookiesFrom
 
 const isTTY = Boolean(process.stdout.isTTY)
 
@@ -79,12 +127,19 @@ if (isTTY) {
   }
 }
 
+// a stale yt-dlp is the usual reason downloads start failing; keep it fresh
+// quietly while the user works
+const stopAutoUpdate = autoUpdateYtDlp()
+void sweepStaleInfoFiles()
+
 let outcome: Outcome = {}
 const {waitUntilExit} = render(
   <App
     initialUrl={initialUrl}
     clipboardUrl={clipboardUrl}
     initialThemeMode={initialThemeMode}
+    cookiesFrom={cookiesFrom}
+    cookiesAuto={cookiesAuto}
     onOutcome={result => (outcome = result)}
   />,
   // keep a copy of every frame so clicks can be hit-tested against it
@@ -92,6 +147,10 @@ const {waitUntilExit} = render(
 )
 
 await waitUntilExit()
+
+// quitting must quit: an in-flight background update would otherwise hold
+// the process open on a restored terminal, looking like a hang
+stopAutoUpdate()
 
 if (isTTY) leaveAltScreen()
 if (outcome.filepath) {

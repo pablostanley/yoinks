@@ -14,7 +14,9 @@ import {TextInput} from './components/text-input.js'
 import {clickTargetAt, findFrameRow, frameRowSpan, type ClickTarget} from './lib/click-map.js'
 import {formatBytes, formatDuration, formatEta, formatSpeed, shortenPath, truncate, wrapText} from './lib/format.js'
 import {addToHistory, loadHistory} from './lib/history.js'
+import {cookiesForUrl} from './lib/browsers.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
+import {revealInFileManager} from './lib/reveal.js'
 import {useMouseClick} from './lib/use-mouse-click.js'
 import {nextThemeMode, ThemeProvider, type ThemeMode, useTheme} from './theme.js'
 import {
@@ -118,7 +120,10 @@ const HINTS: Record<Phase['name'], Array<[string, string]>> = {
     ['esc', 'cancel'],
     ['^c', 'quit'],
   ],
-  done: [['^c', 'quit']],
+  done: [
+    ['o', 'open folder'],
+    ['^c', 'quit'],
+  ],
   error: [
     ['↵', 'try again'],
     ['^c', 'quit'],
@@ -129,8 +134,16 @@ type AppProps = {
   initialUrl?: string
   clipboardUrl?: string
   initialThemeMode?: ThemeMode
+  cookiesFrom?: string
+  /** True when the browser was guessed rather than chosen — see cli.tsx. */
+  cookiesAuto?: boolean
   onOutcome: (outcome: Outcome) => void
 }
+
+// yt-dlp says things like "could not find firefox cookies database in …" or
+// "failed to decrypt with DPAPI"; all of them name the cookies
+const isCookieProblem = (error: unknown) =>
+  /cookie/i.test(error instanceof Error ? error.message : String(error))
 
 export function App({initialThemeMode = 'auto', ...props}: AppProps) {
   const [themeMode, setThemeMode] = useState(initialThemeMode)
@@ -148,11 +161,15 @@ export function App({initialThemeMode = 'auto', ...props}: AppProps) {
 function AppContent({
   initialUrl,
   clipboardUrl,
+  cookiesFrom,
+  cookiesAuto,
   onOutcome,
   cycleTheme,
 }: {
   initialUrl?: string
   clipboardUrl?: string
+  cookiesFrom?: string
+  cookiesAuto?: boolean
   onOutcome: (outcome: Outcome) => void
   cycleTheme: () => void
 }) {
@@ -166,6 +183,12 @@ function AppContent({
   const [info, setInfo] = useState<VideoInfo>()
   const [choices, setChoices] = useState<DownloadChoice[]>([])
   const ytdlpRef = useRef('')
+  // cookies for this session: dropped for good once they prove unusable
+  const cookiesRef = useRef(cookiesFrom)
+  // …and the ones the current link actually went out with, so the download
+  // repeats exactly what the probe got away with
+  const usedCookiesRef = useRef<string | undefined>(undefined)
+  const [activeCookies, setActiveCookies] = useState(cookiesFrom)
   const highlightRef = useRef(0) // choice under the cursor, for the ↵ hint click
   const infoJsonRef = useRef<string | undefined>(undefined)
   const abortRef = useRef<AbortController | undefined>(undefined)
@@ -187,7 +210,27 @@ function AppContent({
       ytdlpRef.current = ytdlp
       if (controller.signal.aborted) return
       setPhase({name: 'probing', status: 'fetching video info…'})
-      const {info: videoInfo, infoJsonPath} = await probe(ytdlp, targetUrl, controller.signal)
+      // cookies a browser we guessed may be locked, encrypted, or simply
+      // unwelcome on this site — never let them cost a link that works
+      // signed out anyway
+      const wanted = cookiesForUrl(cookiesRef.current, cookiesAuto, targetUrl)
+      usedCookiesRef.current = wanted
+      let result
+      try {
+        result = await probe(ytdlp, targetUrl, {cookiesFrom: wanted}, controller.signal)
+      } catch (error) {
+        if (!cookiesAuto || !wanted || controller.signal.aborted) throw error
+        // an unreadable cookie store stays unreadable: stop asking for the
+        // rest of the session. Any other failure only retires the cookies
+        // for this one link
+        if (isCookieProblem(error)) {
+          cookiesRef.current = undefined
+          setActiveCookies(undefined)
+        }
+        usedCookiesRef.current = undefined
+        result = await probe(ytdlp, targetUrl, {}, controller.signal)
+      }
+      const {info: videoInfo, infoJsonPath} = result
       if (controller.signal.aborted) return
       infoJsonRef.current = infoJsonPath
       setInfo(videoInfo)
@@ -198,11 +241,17 @@ function AppContent({
       if (controller.signal.aborted) return
       setPhase({name: 'error', message: error instanceof Error ? error.message : String(error)})
     }
-  }, [])
+  }, [cookiesAuto])
 
   useEffect(() => {
     if (initialUrl) void startProbe(initialUrl)
   }, [initialUrl, startProbe])
+
+  const [revealFailed, setRevealFailed] = useState(false)
+
+  const openFolder = useCallback((filepath: string) => {
+    void revealInFileManager(filepath).then(opened => setRevealFailed(!opened))
+  }, [])
 
   const resetToInput = useCallback(() => {
     setUrl('')
@@ -210,6 +259,7 @@ function AppContent({
     setPlatform(undefined)
     setInfo(undefined)
     setChoices([])
+    setRevealFailed(false)
     setPhase({name: 'input'})
   }, [])
 
@@ -223,6 +273,10 @@ function AppContent({
     (input, key) => {
       if (key.ctrl && input === 't') {
         cycleTheme()
+        return
+      }
+      if (input === 'o' && !key.ctrl && !key.meta && phase.name === 'done') {
+        openFolder(phase.filepath)
         return
       }
       if (key.escape && (phase.name === 'picking' || phase.name === 'error' || phase.name === 'done')) resetToInput()
@@ -259,7 +313,14 @@ function AppContent({
       }
       try {
         const ffmpegLocation = await findFfmpeg()
-        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, outDir: OUT_DIR}
+        const base = {
+          ytdlp: ytdlpRef.current,
+          ffmpegLocation,
+          url,
+          choice,
+          cookiesFrom: usedCookiesRef.current,
+          outDir: OUT_DIR,
+        }
         let filepath: string
         try {
           // reuse the probe's metadata — starts immediately instead of re-extracting
@@ -293,6 +354,7 @@ function AppContent({
   const hintAction = (key: string): (() => void) | undefined => {
     if (key === '^c') return () => exit()
     if (key === '^t') return cycleTheme
+    if (key === 'o' && phase.name === 'done') return () => openFolder(phase.filepath)
     if (key === 'esc') return phase.name === 'probing' || phase.name === 'downloading' ? cancelRun : resetToInput
     if (key === '↵') {
       if (phase.name === 'input') return () => handleUrlSubmit(urlInput)
@@ -471,6 +533,9 @@ function AppContent({
             <Text color={theme.primary}>find your file in:</Text>
           </Text>
           <Text color={theme.gray} dimColor={theme.dimSecondary}>{shortenPath(phase.filepath, os.homedir(), 60)}</Text>
+          {revealFailed ? (
+            <Text color={theme.gray} dimColor={theme.dimSecondary}>✗ no file manager to open it with</Text>
+          ) : null}
           <Gap />
           <Box
             borderStyle="round"
@@ -503,6 +568,10 @@ function AppContent({
                   </Text>
                   <Text color={theme.gray} dimColor={theme.dimSecondary}> {phase.status}</Text>
                 </Text>
+              ) : phase.name === 'input' && activeCookies ? (
+                // a remembered --cookies setting is silent otherwise, and
+                // "why is it logged in as me?" deserves an answer on screen
+                <Text color={theme.gray} dimColor={theme.dimSecondary}>cookies: {activeCookies}</Text>
               ) : undefined
             }
           />

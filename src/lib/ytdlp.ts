@@ -18,11 +18,11 @@ function ytDlpAssetName(): string {
 
 // async on purpose: a spawnSync here blocks the event loop, which freezes
 // ink mid-frame — the user hits enter and sees nothing until it returns
-function commandWorks(cmd: string, args: string[]): Promise<boolean> {
+function commandWorks(cmd: string, args: string[], signal?: AbortSignal): Promise<boolean> {
   return new Promise(resolve => {
     let child
     try {
-      child = spawn(cmd, args, {stdio: 'ignore', timeout: 10_000})
+      child = spawn(cmd, args, {stdio: 'ignore', timeout: 10_000, signal})
     } catch {
       resolve(false)
       return
@@ -37,11 +37,13 @@ function commandWorks(cmd: string, args: string[]): Promise<boolean> {
  * downloaded copy, then download the standalone binary from GitHub releases.
  */
 export async function ensureYtDlp(onStatus: (message: string) => void, signal?: AbortSignal): Promise<string> {
-  if (await commandWorks('yt-dlp', ['--version'])) return 'yt-dlp'
+  if (await commandWorks('yt-dlp', ['--version'], signal)) return 'yt-dlp'
 
   const local = path.join(YOINKS_DIR, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp')
-  if (await commandWorks(local, ['--version'])) return local
+  if (await commandWorks(local, ['--version'], signal)) return local
 
+  // a cancelled check also returns false
+  signal?.throwIfAborted()
   onStatus('first run: fetching yt-dlp…')
   await fs.mkdir(YOINKS_DIR, {recursive: true})
 
@@ -140,32 +142,48 @@ export type DownloadChoice = {
 
 const MAX_VIDEO_CHOICES = 8
 
+// QuickTime can't play VP9 and only newer Macs play AV1, but yt-dlp picks
+// them over H.264. Ask for H.264 first, then AV1, with AAC audio.
+const WITH_AAC = '+(ba[acodec^=mp4a]/ba)'
+
+function videoSelector(height: number): string {
+  return [
+    `bv*[height=${height}][vcodec~='^(avc|h264)']${WITH_AAC}`,
+    `bv*[height=${height}][vcodec^=av01]${WITH_AAC}`,
+    `bv*[height=${height}]+ba`,
+    `b[height=${height}]`,
+    `bv*[height<=${height}]+ba`,
+    'b',
+  ].join('/')
+}
+
 export function buildChoices(info: VideoInfo): DownloadChoice[] {
   const formats = info.formats ?? []
   const choices: DownloadChoice[] = []
 
   const audioOnly = formats.filter(f => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none'))
-  const bestAudio = [...audioOnly].sort((a, b) => (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0))[0]
-  const audioSize = bestAudio?.filesize ?? bestAudio?.filesize_approx
+  const bestAudio = [...audioOnly].sort(byBitrate)[0]
+  const audioSize = sizeOf(bestAudio)
+  const videoAudio = audioOnly.filter(f => f.acodec?.startsWith('mp4a')).sort(byBitrate)[0] ?? bestAudio
 
   const videos = formats.filter(f => f.vcodec && f.vcodec !== 'none' && f.height)
   const heights = [...new Set(videos.map(f => f.height as number))].sort((a, b) => b - a)
 
   for (const height of heights.slice(0, MAX_VIDEO_CHOICES)) {
     const candidates = videos.filter(f => f.height === height)
-    const best = [...candidates].sort((a, b) => scoreVideo(b) - scoreVideo(a))[0]
+    // guess the stream videoSelector will get, so the size matches the download
+    const preferred = [isH264, isAv1].map(is => candidates.filter(is)).find(group => group.length > 0) ?? candidates
+    const best = [...preferred].sort((a, b) => Number(Boolean(sizeOf(b))) - Number(Boolean(sizeOf(a))) || byBitrate(a, b))[0]!
     const muxed = best.acodec && best.acodec !== 'none'
-    const size = (best.filesize ?? best.filesize_approx ?? 0) + (muxed ? 0 : audioSize ?? 0)
+    const audio = isH264(best) || isAv1(best) ? videoAudio : bestAudio
+    const videoSize = sizeOf(best) ?? (best.tbr && info.duration ? (best.tbr * 1000 * info.duration) / 8 : undefined)
+    // if the video size is unknown, show nothing rather than just the audio size
+    const size = videoSize === undefined ? 0 : videoSize + (muxed ? 0 : sizeOf(audio) ?? 0)
     const sizeLabel = size > 0 ? ` · ~${formatBytes(size)}` : ''
     choices.push({
       kind: 'video',
       label: `${height}p · mp4${sizeLabel}`,
-      args: [
-        '-f',
-        `bv*[height=${height}]+ba/b[height=${height}]/bv*[height<=${height}]+ba/b`,
-        '--merge-output-format',
-        'mp4',
-      ],
+      args: ['-f', videoSelector(height), '--merge-output-format', 'mp4'],
     })
   }
 
@@ -187,12 +205,10 @@ export function buildChoices(info: VideoInfo): DownloadChoice[] {
   return choices
 }
 
-function scoreVideo(f: RawFormat): number {
-  let score = f.tbr ?? 0
-  if (f.ext === 'mp4') score += 10_000
-  if (f.vcodec?.startsWith('avc')) score += 5_000
-  return score
-}
+const isH264 = (f: RawFormat) => /^(avc|h264)/.test(f.vcodec ?? '')
+const isAv1 = (f: RawFormat) => f.vcodec?.startsWith('av01') ?? false
+const sizeOf = (f?: RawFormat) => f?.filesize ?? f?.filesize_approx
+const byBitrate = (a: RawFormat, b: RawFormat) => (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0)
 
 export type DownloadProgress = {
   downloadedBytes: number
@@ -215,19 +231,47 @@ const PROGRESS_TEMPLATE = `${PROGRESS_PREFIX}%(progress.downloaded_bytes)s|%(pro
 let activeChild: ChildProcess | undefined
 process.on('exit', () => activeChild?.kill('SIGTERM'))
 
-export function download(
-  opts: {
-    ytdlp: string
-    ffmpegLocation?: string
-    url: string
-    /** When set, reuse the probe's metadata instead of re-extracting — starts much faster. */
-    infoJsonPath?: string
-    choice: DownloadChoice
-    outDir: string
-  },
-  handlers: DownloadHandlers,
-  signal?: AbortSignal,
-): Promise<string> {
+type DownloadOptions = {
+  ytdlp: string
+  ffmpegLocation?: string
+  url: string
+  /** When set, reuse the probe's metadata instead of re-extracting — starts much faster. */
+  infoJsonPath?: string
+  choice: DownloadChoice
+  outDir: string
+}
+
+export async function download(opts: DownloadOptions, handlers: DownloadHandlers, signal?: AbortSignal): Promise<string> {
+  // yt-dlp skips a file that already exists and returns the old one, so
+  // download into an empty folder and pick a free name at the end
+  await fs.mkdir(opts.outDir, {recursive: true})
+  const staging = await fs.mkdtemp(path.join(opts.outDir, '.yoinks-'))
+  try {
+    const staged = await runYtDlp({...opts, outDir: staging}, handlers, signal)
+    return await moveToFreeName(staged, opts.outDir)
+  } finally {
+    // this also removes partial files from a cancelled or failed download
+    await fs.rm(staging, {recursive: true, force: true}).catch(() => {})
+  }
+}
+
+/** Moves file into dir, adding " (1)", " (2)"… if the name is taken. */
+async function moveToFreeName(file: string, dir: string): Promise<string> {
+  const {name, ext} = path.parse(file)
+  for (let n = 0; ; n++) {
+    const target = path.join(dir, n === 0 ? `${name}${ext}` : `${name} (${n})${ext}`)
+    const taken = await fs.lstat(target).then(
+      () => true,
+      () => false,
+    )
+    if (!taken) {
+      await fs.rename(file, target)
+      return target
+    }
+  }
+}
+
+function runYtDlp(opts: DownloadOptions, handlers: DownloadHandlers, signal?: AbortSignal): Promise<string> {
   const args = [
     ...(opts.infoJsonPath ? ['--load-info-json', opts.infoJsonPath] : [opts.url]),
     ...opts.choice.args,
@@ -258,8 +302,6 @@ export function download(
     let totalParts = 1
     let lastDownloaded = 0
     let buffer = ''
-    // every file yt-dlp writes this run, so a cancel can clean up after itself
-    const destinations: string[] = []
 
     child.stdout.on('data', (chunk: Buffer) => {
       buffer += chunk.toString()
@@ -285,28 +327,24 @@ export function download(
           // "[info] xxx: Downloading 1 format(s): 395+251" — each id is one file
           totalParts = (line.split('format(s):')[1] ?? '').trim().split('+').length
         } else if (line.includes('[Merger]') || line.includes('[ExtractAudio]')) {
-          const merging = /^\[Merger\] Merging formats into "(.+)"$/.exec(line)?.[1]
-          const extracting = /^\[ExtractAudio\] Destination: (.+)$/.exec(line)?.[1]
-          const target = merging ?? extracting
-          if (target) destinations.push(target)
           handlers.onProcessing()
-        } else if (line.startsWith('[download] Destination: ')) {
-          destinations.push(line.slice('[download] Destination: '.length))
         } else if (path.isAbsolute(line)) {
           filepath = line
         }
       }
     })
     child.stderr.on('data', chunk => (stderr += chunk))
-    child.on('error', reject)
-    child.on('close', code => {
+    child.on('error', error => {
+      if (!signal?.aborted) reject(error)
+    })
+    // on cancel, wait for yt-dlp to exit but not for 'close': something it
+    // started (like ffmpeg) can keep the pipes open for a while
+    child.on('exit', () => {
       activeChild = undefined
-      if (signal?.aborted) {
-        // cancelled on purpose — don't leave half-written files behind
-        void removePartials(destinations)
-        reject(new Error('Download cancelled.'))
-        return
-      }
+      if (signal?.aborted) reject(new Error('Download cancelled.'))
+    })
+    child.on('close', code => {
+      if (signal?.aborted) return
       if (code === 0 && filepath) {
         resolve(filepath)
       } else {
@@ -314,14 +352,6 @@ export function download(
       }
     })
   })
-}
-
-function removePartials(destinations: string[]): Promise<unknown> {
-  return Promise.allSettled(
-    destinations
-      .flatMap(dest => [dest, `${dest}.part`, `${dest}.ytdl`])
-      .map(file => fs.rm(file, {force: true})),
-  )
 }
 
 function toNumber(value: string | undefined): number | undefined {

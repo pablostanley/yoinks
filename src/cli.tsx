@@ -60,9 +60,18 @@ if (!initialUrl && isTTY) {
   // reject multi-line clipboard content — new URL() silently strips newlines
   if (clipped && !/\s/.test(clipped) && isProbablyUrl(clipped)) clipboardUrl = clipped
 }
-const enterAltScreen = () => process.stdout.write('\x1b[?1049h\x1b[H')
+let inAltScreen = false
+const enterAltScreen = () => {
+  process.stdout.write('\x1b[?1049h\x1b[H')
+  inAltScreen = true
+}
 // also switch mouse tracking off — a crash can skip React effect cleanup
-const leaveAltScreen = () => process.stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?1049l')
+// only once: doing it again moves the cursor back over the "yoinked →" line
+const leaveAltScreen = () => {
+  if (!inAltScreen) return
+  inAltScreen = false
+  process.stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?1049l')
+}
 
 if (isTTY) {
   enterAltScreen()

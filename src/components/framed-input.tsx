@@ -3,7 +3,7 @@ import {Box, Text} from 'ink'
 import {useTheme} from '../theme.js'
 
 /** Total columns the button occupies (label + 2 cells padding per side). */
-const frameButtonWidth = (label: string) => label.length + 4
+export const frameButtonWidth = (label: string) => label.length + 4
 
 /**
  * A single-line input frame with the title sitting on the top border,

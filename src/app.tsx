@@ -1,10 +1,11 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react'
+import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {Box, Text, useApp, useInput, useStdout} from 'ink'
 import SelectInput, {type IndicatorProps, type ItemProps} from 'ink-select-input'
 import Spinner from 'ink-spinner'
-import {FramedInput} from './components/framed-input.js'
+import {FramedInput, frameButtonWidth} from './components/framed-input.js'
 import {FullScreen} from './components/fullscreen.js'
 import {Logo} from './components/logo.js'
 import {Panel} from './components/panel.js'
@@ -172,8 +173,25 @@ function AppContent({
   const [phase, setPhase] = useState<Phase>(initialUrl ? {name: 'probing', status: 'warming up…'} : {name: 'input'})
 
   const columns = stdout?.columns && stdout.columns > 0 ? stdout.columns : 80
-  const boxWidth = Math.max(14, Math.min(64, columns - 6))
+  // leave room for the button next to the box
+  const boxWidth = Math.max(14, Math.min(64, columns - 6 - frameButtonWidth(YOINK_BUTTON)))
   const contentWidth = Math.max(10, Math.min(columns - 4, 78))
+
+  // delete the old info json when it's replaced or no longer needed
+  const setInfoJson = useCallback((next?: string) => {
+    const previous = infoJsonRef.current
+    infoJsonRef.current = next
+    if (previous && previous !== next) void fs.rm(previous, {force: true}).catch(() => {})
+  }, [])
+
+  // stop any running probe or download on quit, or the process keeps going
+  useEffect(
+    () => () => {
+      abortRef.current?.abort()
+      setInfoJson(undefined)
+    },
+    [setInfoJson],
+  )
 
   const startProbe = useCallback(async (targetUrl: string) => {
     const controller = new AbortController()
@@ -188,8 +206,11 @@ function AppContent({
       if (controller.signal.aborted) return
       setPhase({name: 'probing', status: 'fetching video info…'})
       const {info: videoInfo, infoJsonPath} = await probe(ytdlp, targetUrl, controller.signal)
-      if (controller.signal.aborted) return
-      infoJsonRef.current = infoJsonPath
+      if (controller.signal.aborted) {
+        void fs.rm(infoJsonPath, {force: true}).catch(() => {})
+        return
+      }
+      setInfoJson(infoJsonPath)
       setInfo(videoInfo)
       setChoices(buildChoices(videoInfo))
       highlightRef.current = 0
@@ -198,7 +219,7 @@ function AppContent({
       if (controller.signal.aborted) return
       setPhase({name: 'error', message: error instanceof Error ? error.message : String(error)})
     }
-  }, [])
+  }, [setInfoJson])
 
   useEffect(() => {
     if (initialUrl) void startProbe(initialUrl)
@@ -210,14 +231,20 @@ function AppContent({
     setPlatform(undefined)
     setInfo(undefined)
     setChoices([])
+    setInfoJson(undefined)
     setPhase({name: 'input'})
-  }, [])
+  }, [setInfoJson])
+
+  // go back to the input but keep the link
+  const backToUrl = useCallback(() => {
+    resetToInput()
+    setUrlInput(url)
+  }, [resetToInput, url])
 
   const cancelRun = useCallback(() => {
     abortRef.current?.abort()
-    resetToInput()
-    setUrlInput(url) // keep the link around so a cancel isn't destructive
-  }, [resetToInput, url])
+    backToUrl()
+  }, [backToUrl])
 
   useInput(
     (input, key) => {
@@ -227,7 +254,8 @@ function AppContent({
       }
       if (key.escape && (phase.name === 'picking' || phase.name === 'error' || phase.name === 'done')) resetToInput()
       if (key.escape && (phase.name === 'probing' || phase.name === 'downloading')) cancelRun()
-      if (key.return && (phase.name === 'error' || phase.name === 'done')) resetToInput()
+      if (key.return && phase.name === 'error') backToUrl()
+      if (key.return && phase.name === 'done') resetToInput()
     },
     {isActive: Boolean(process.stdin.isTTY)},
   )
@@ -297,7 +325,8 @@ function AppContent({
     if (key === '↵') {
       if (phase.name === 'input') return () => handleUrlSubmit(urlInput)
       if (phase.name === 'picking') return () => handlePick({value: highlightRef.current})
-      if (phase.name === 'error' || phase.name === 'done') return resetToInput
+      if (phase.name === 'error') return backToUrl
+      if (phase.name === 'done') return resetToInput
     }
     return undefined // ↑↓ / ↑ stay keyboard-only
   }

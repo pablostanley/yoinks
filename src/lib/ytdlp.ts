@@ -63,16 +63,22 @@ export async function ensureYtDlp(onStatus: (message: string) => void, signal?: 
  * ffmpeg-static as fallback. Returns undefined if neither exists — yt-dlp
  * still works for single-file formats without it.
  */
+let ffmpegPathPromise: Promise<string | undefined> | undefined
+
 export async function findFfmpeg(): Promise<string | undefined> {
-  if (await commandWorks('ffmpeg', ['-version'])) return undefined // on PATH, yt-dlp finds it itself
-  try {
-    const mod = await import('ffmpeg-static')
-    const ffmpegPath = (mod.default ?? mod) as unknown as string | null
-    if (ffmpegPath && (await commandWorks(ffmpegPath, ['-version']))) return ffmpegPath
-  } catch {
-    // ffmpeg-static not installed or unsupported platform
-  }
-  return undefined
+  ffmpegPathPromise ??= (async () => {
+    if (await commandWorks('ffmpeg', ['-version'])) return undefined // on PATH, yt-dlp finds it itself
+    try {
+      const mod = await import('ffmpeg-static')
+      const ffmpegPath = (mod.default ?? mod) as unknown as string | null
+      if (ffmpegPath && (await commandWorks(ffmpegPath, ['-version']))) return ffmpegPath
+    } catch {
+      // ffmpeg-static not installed or unsupported platform
+    }
+    return undefined
+  })()
+
+  return ffmpegPathPromise
 }
 
 export type VideoInfo = {

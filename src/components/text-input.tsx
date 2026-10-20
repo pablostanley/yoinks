@@ -1,6 +1,7 @@
 import React, {useRef, useState} from 'react'
 import {Text, useInput} from 'ink'
 import {stripMouseReports} from '../lib/use-mouse-click.js'
+import {readClipboard} from '../lib/clipboard.js'
 import {useTheme} from '../theme.js'
 
 type Props = {
@@ -145,6 +146,18 @@ export function TextInput({
       if (input === 'w') {
         const end = selection ? selection[1] : cursor
         return removeRange(wordLeft(value, selection ? selection[0] : cursor), end)
+      }
+      // ctrl+v (and ctrl+shift+v on some terminals) pastes the system clipboard
+      if (input === 'v' || input === 'V') {
+        // eslint-disable-next-line no-control-regex
+        const clean = stripMouseReports(readClipboard()).replace(/[\x00-\x1f\x7f]/g, '')
+        if (clean) {
+          const [start, end] = selection ?? [cursor, cursor]
+          const next = value.slice(0, start) + clean + value.slice(end)
+          edit(next, start + clean.length)
+          if (clean.length > 1 && value === '' && submitOnPaste?.(next.trim())) onSubmit?.(next)
+        }
+        return
       }
       return
     }

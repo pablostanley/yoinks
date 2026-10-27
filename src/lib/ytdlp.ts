@@ -181,7 +181,17 @@ export function buildChoices(info: VideoInfo): DownloadChoice[] {
   choices.push({
     kind: 'audio',
     label: `audio only · mp3${audioSizeLabel}`,
-    args: ['-f', 'ba/b', '-x', '--audio-format', 'mp3', '--audio-quality', '0'],
+    args: [
+      '-f',
+      'ba/b',
+      '-x',
+      '--audio-format',
+      'mp3',
+      '--audio-quality',
+      '0',
+      '--embed-thumbnail',
+      '--embed-metadata',
+    ],
   })
 
   return choices
@@ -284,12 +294,28 @@ export function download(
         } else if (line.includes('Downloading 1 format(s):')) {
           // "[info] xxx: Downloading 1 format(s): 395+251" — each id is one file
           totalParts = (line.split('format(s):')[1] ?? '').trim().split('+').length
-        } else if (line.includes('[Merger]') || line.includes('[ExtractAudio]')) {
+        } else if (
+          line.includes('[Merger]') ||
+          line.includes('[ExtractAudio]') ||
+          line.includes('[ThumbnailsConvertor]') ||
+          line.includes('[EmbedThumbnail]') ||
+          line.includes('[Metadata]')
+        ) {
           const merging = /^\[Merger\] Merging formats into "(.+)"$/.exec(line)?.[1]
           const extracting = /^\[ExtractAudio\] Destination: (.+)$/.exec(line)?.[1]
+          const converting = /^\[ThumbnailsConvertor\] Converting thumbnail "(.+)" to (\w+)$/.exec(line)
           const target = merging ?? extracting
           if (target) destinations.push(target)
+          if (converting?.[1]) {
+            destinations.push(converting[1])
+            const ext = converting[2]
+            const base = converting[1].slice(0, converting[1].lastIndexOf('.'))
+            if (base && ext) destinations.push(`${base}.${ext}`)
+          }
           handlers.onProcessing()
+        } else if (line.includes('Writing video thumbnail')) {
+          const thumb = /Writing video thumbnail .+ to: (.+)$/.exec(line)?.[1]
+          if (thumb) destinations.push(thumb)
         } else if (line.startsWith('[download] Destination: ')) {
           destinations.push(line.slice('[download] Destination: '.length))
         } else if (path.isAbsolute(line)) {

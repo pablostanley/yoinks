@@ -26,7 +26,7 @@ Or try it without installing anything:
 npx yoinks
 ```
 
-Requires Node 18+. Everything else (yt-dlp, ffmpeg) is fetched or bundled
+Requires Node 22+. Everything else (yt-dlp, ffmpeg) is fetched or bundled
 automatically.
 
 ## Usage

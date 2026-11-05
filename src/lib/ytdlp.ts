@@ -1,14 +1,16 @@
-import {spawn, type ChildProcess} from 'node:child_process'
-import {createWriteStream} from 'node:fs'
+import {spawn, spawnSync, type ChildProcess} from 'node:child_process'
+import {createHash} from 'node:crypto'
+import {rmSync} from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import {Readable} from 'node:stream'
-import {pipeline} from 'node:stream/promises'
 import {formatBytes} from './format.js'
 
 const YOINKS_DIR = path.join(os.homedir(), '.yoinks', 'bin')
 const RELEASE_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download'
+
+// yt-dlp is Python: force UTF-8 so non-latin titles survive on Windows
+const YTDLP_ENV = {...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1'}
 
 function ytDlpAssetName(): string {
   if (process.platform === 'win32') return 'yt-dlp.exe'
@@ -16,8 +18,7 @@ function ytDlpAssetName(): string {
   return process.arch === 'arm64' ? 'yt-dlp_linux_aarch64' : 'yt-dlp_linux'
 }
 
-// async on purpose: a spawnSync here blocks the event loop, which freezes
-// ink mid-frame — the user hits enter and sees nothing until it returns
+// async so the UI keeps rendering while we check
 function commandWorks(cmd: string, args: string[]): Promise<boolean> {
   return new Promise(resolve => {
     let child
@@ -32,10 +33,7 @@ function commandWorks(cmd: string, args: string[]): Promise<boolean> {
   })
 }
 
-/**
- * Resolve a usable yt-dlp binary: system install first, then a previously
- * downloaded copy, then download the standalone binary from GitHub releases.
- */
+/** Use an installed yt-dlp, else a cached copy, else download and verify one. */
 export async function ensureYtDlp(onStatus: (message: string) => void, signal?: AbortSignal): Promise<string> {
   if (await commandWorks('yt-dlp', ['--version'])) return 'yt-dlp'
 
@@ -45,35 +43,120 @@ export async function ensureYtDlp(onStatus: (message: string) => void, signal?: 
   onStatus('first run: fetching yt-dlp…')
   await fs.mkdir(YOINKS_DIR, {recursive: true})
 
-  const url = `${RELEASE_BASE}/${ytDlpAssetName()}`
-  const response = await fetch(url, {signal})
-  if (!response.ok || !response.body) {
-    throw new Error(`Could not download yt-dlp (${response.status}). Check your connection and try again.`)
-  }
-
+  const asset = ytDlpAssetName()
   const tmp = `${local}.download`
-  await pipeline(Readable.fromWeb(response.body as never), createWriteStream(tmp), {signal})
-  await fs.chmod(tmp, 0o755)
-  await fs.rename(tmp, local)
+  try {
+    const [binary, sums] = await Promise.all([
+      fetchOk(`${RELEASE_BASE}/${asset}`, signal).then(r => r.arrayBuffer()),
+      fetchOk(`${RELEASE_BASE}/SHA2-256SUMS`, signal).then(r => r.text()),
+    ])
+    const data = Buffer.from(binary)
+    const expected = expectedSha256(sums, asset)
+    const actual = createHash('sha256').update(data).digest('hex')
+    if (!expected || expected !== actual) {
+      throw new Error('Downloaded yt-dlp failed its checksum. Try again later.')
+    }
+    await fs.writeFile(tmp, data, {mode: 0o755})
+    await fs.rename(tmp, local)
+  } finally {
+    await fs.rm(tmp, {force: true})
+  }
   return local
 }
 
-/**
- * Find ffmpeg for stream merging / mp3 extraction: system install first,
- * ffmpeg-static as fallback. Returns undefined if neither exists — yt-dlp
- * still works for single-file formats without it.
- */
+async function fetchOk(url: string, signal?: AbortSignal): Promise<Response> {
+  const response = await fetch(url, {signal})
+  if (!response.ok) {
+    throw new Error(`Could not download yt-dlp (${response.status}). Check your connection and try again.`)
+  }
+  return response
+}
+
+export function expectedSha256(sums: string, asset: string): string | undefined {
+  for (const line of sums.split('\n')) {
+    const [hash, name] = line.trim().split(/\s+/)
+    if (name === asset && hash) return hash.toLowerCase()
+  }
+  return undefined
+}
+
+/** System ffmpeg, else the bundled ffmpeg-static. undefined means "let yt-dlp find it". */
 export async function findFfmpeg(): Promise<string | undefined> {
-  if (await commandWorks('ffmpeg', ['-version'])) return undefined // on PATH, yt-dlp finds it itself
+  if (await commandWorks('ffmpeg', ['-version'])) return undefined
   try {
     const mod = await import('ffmpeg-static')
     const ffmpegPath = (mod.default ?? mod) as unknown as string | null
     if (ffmpegPath && (await commandWorks(ffmpegPath, ['-version']))) return ffmpegPath
   } catch {
-    // ffmpeg-static not installed or unsupported platform
+    // not available on this platform
   }
   return undefined
 }
+
+// Running yt-dlp
+
+let activeChild: ChildProcess | undefined
+
+// last resort if we exit without a clean cancel
+process.on('exit', () => {
+  if (activeChild) killTreeSync(activeChild)
+  for (const file of tempFiles) rmSync(file, {force: true})
+})
+
+function runYtDlp(cmd: string, args: string[], signal?: AbortSignal) {
+  const child = spawn(cmd, ['--encoding', 'utf-8', ...args], {
+    env: YTDLP_ENV,
+    // own process group on unix so a cancel also stops ffmpeg
+    detached: process.platform !== 'win32',
+  })
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  activeChild = child
+
+  let killing: Promise<void> = Promise.resolve()
+  const onAbort = () => (killing = killTree(child))
+  if (signal?.aborted) onAbort()
+  else signal?.addEventListener('abort', onAbort, {once: true})
+
+  child.on('close', () => {
+    signal?.removeEventListener('abort', onAbort)
+    if (activeChild === child) activeChild = undefined
+  })
+  return {child, killed: () => killing}
+}
+
+// yt-dlp.exe is a launcher plus a child, and ffmpeg runs below that: kill the whole tree
+function killTree(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || !child.pid) return Promise.resolve()
+  if (process.platform !== 'win32') {
+    killGroup(child)
+    return Promise.resolve()
+  }
+  return new Promise(resolve => {
+    const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {stdio: 'ignore'})
+    killer.on('error', () => {
+      child.kill()
+      resolve()
+    })
+    killer.on('close', () => resolve())
+  })
+}
+
+function killTreeSync(child: ChildProcess) {
+  if (child.exitCode !== null || !child.pid) return
+  if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], {stdio: 'ignore'})
+  else killGroup(child)
+}
+
+function killGroup(child: ChildProcess) {
+  try {
+    process.kill(-child.pid!, 'SIGTERM')
+  } catch {
+    child.kill('SIGTERM')
+  }
+}
+
+// Probe
 
 export type VideoInfo = {
   title: string
@@ -99,24 +182,30 @@ type RawFormat = {
 
 export type ProbeResult = {
   info: VideoInfo
-  /** Raw -J output saved to disk so downloads can skip re-extraction via --load-info-json. */
+  /** Saved probe output, so the download can skip re-extracting. */
   infoJsonPath: string
+}
+
+const tempFiles = new Set<string>()
+
+export function removeInfoJson(file: string | undefined) {
+  if (!file) return
+  tempFiles.delete(file)
+  void fs.rm(file, {force: true})
 }
 
 export async function probe(ytdlp: string, url: string, signal?: AbortSignal): Promise<ProbeResult> {
   const stdout = await new Promise<string>((resolve, reject) => {
-    const child = spawn(ytdlp, ['-J', '--no-playlist', '--no-warnings', url], {signal})
+    const {child} = runYtDlp(ytdlp, ['-J', '--no-playlist', '--no-warnings', url], signal)
     let out = ''
     let stderr = ''
-    child.stdout.on('data', chunk => (out += chunk))
-    child.stderr.on('data', chunk => (stderr += chunk))
+    child.stdout!.on('data', chunk => (out += chunk))
+    child.stderr!.on('data', chunk => (stderr += chunk))
     child.on('error', reject)
     child.on('close', code => {
-      if (code !== 0) {
-        reject(new Error(cleanYtDlpError(stderr) || `yt-dlp exited with code ${code}`))
-      } else {
-        resolve(out)
-      }
+      if (signal?.aborted) reject(new Error('Cancelled.'))
+      else if (code !== 0) reject(new Error(cleanYtDlpError(stderr) || `yt-dlp exited with code ${code}`))
+      else resolve(out)
     })
   })
 
@@ -128,9 +217,12 @@ export async function probe(ytdlp: string, url: string, signal?: AbortSignal): P
   }
 
   const infoJsonPath = path.join(os.tmpdir(), `yoinks-info-${process.pid}-${Date.now()}.json`)
+  tempFiles.add(infoJsonPath)
   await fs.writeFile(infoJsonPath, stdout)
   return {info, infoJsonPath}
 }
+
+// Format choices
 
 export type DownloadChoice = {
   label: string
@@ -139,6 +231,9 @@ export type DownloadChoice = {
 }
 
 const MAX_VIDEO_CHOICES = 8
+
+const mp4Video = (format: string) => ['-f', format, '--merge-output-format', 'mp4']
+const mp3Audio = ['-f', 'ba/b', '-x', '--audio-format', 'mp3', '--audio-quality', '0']
 
 export function buildChoices(info: VideoInfo): DownloadChoice[] {
   const formats = info.formats ?? []
@@ -153,36 +248,23 @@ export function buildChoices(info: VideoInfo): DownloadChoice[] {
 
   for (const height of heights.slice(0, MAX_VIDEO_CHOICES)) {
     const candidates = videos.filter(f => f.height === height)
-    const best = [...candidates].sort((a, b) => scoreVideo(b) - scoreVideo(a))[0]
+    const best = [...candidates].sort((a, b) => scoreVideo(b) - scoreVideo(a))[0]!
     const muxed = best.acodec && best.acodec !== 'none'
     const size = (best.filesize ?? best.filesize_approx ?? 0) + (muxed ? 0 : audioSize ?? 0)
     const sizeLabel = size > 0 ? ` · ~${formatBytes(size)}` : ''
     choices.push({
       kind: 'video',
       label: `${height}p · mp4${sizeLabel}`,
-      args: [
-        '-f',
-        `bv*[height=${height}]+ba/b[height=${height}]/bv*[height<=${height}]+ba/b`,
-        '--merge-output-format',
-        'mp4',
-      ],
+      args: mp4Video(`bv*[height=${height}]+ba/b[height=${height}]/bv*[height<=${height}]+ba/b`),
     })
   }
 
   if (choices.length === 0) {
-    choices.push({
-      kind: 'video',
-      label: 'best available · mp4',
-      args: ['-f', 'bv*+ba/b', '--merge-output-format', 'mp4'],
-    })
+    choices.push({kind: 'video', label: 'best available · mp4', args: mp4Video('bv*+ba/b')})
   }
 
   const audioSizeLabel = audioSize ? ` · ~${formatBytes(audioSize)}` : ''
-  choices.push({
-    kind: 'audio',
-    label: `audio only · mp3${audioSizeLabel}`,
-    args: ['-f', 'ba/b', '-x', '--audio-format', 'mp3', '--audio-quality', '0'],
-  })
+  choices.push({kind: 'audio', label: `audio only · mp3${audioSizeLabel}`, args: mp3Audio})
 
   return choices
 }
@@ -194,13 +276,15 @@ function scoreVideo(f: RawFormat): number {
   return score
 }
 
+// Download
+
 export type DownloadProgress = {
   downloadedBytes: number
   totalBytes?: number
   speed?: number
   eta?: number
   part: number
-  /** How many files this download resolves to (video+audio merges are 2). */
+  /** Number of files in this download (video + audio is 2). */
   totalParts: number
 }
 
@@ -212,15 +296,12 @@ export type DownloadHandlers = {
 const PROGRESS_PREFIX = 'YOINK|'
 const PROGRESS_TEMPLATE = `${PROGRESS_PREFIX}%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s`
 
-let activeChild: ChildProcess | undefined
-process.on('exit', () => activeChild?.kill('SIGTERM'))
-
 export function download(
   opts: {
     ytdlp: string
     ffmpegLocation?: string
     url: string
-    /** When set, reuse the probe's metadata instead of re-extracting — starts much faster. */
+    /** Reuse the probe output instead of re-extracting. */
     infoJsonPath?: string
     choice: DownloadChoice
     outDir: string
@@ -234,8 +315,7 @@ export function download(
     '--no-playlist',
     '--no-warnings',
     '--newline',
-    // --print implies --quiet, which suppresses progress bars and the
-    // [Merger]/[ExtractAudio] lines we detect the processing phase from
+    // --print turns on --quiet, which would hide the progress and [Merger] lines we read
     '--no-quiet',
     '--progress',
     '--progress-template',
@@ -249,8 +329,7 @@ export function download(
   if (opts.ffmpegLocation) args.push('--ffmpeg-location', opts.ffmpegLocation)
 
   return new Promise((resolve, reject) => {
-    const child = spawn(opts.ytdlp, args, {signal})
-    activeChild = child
+    const {child, killed} = runYtDlp(opts.ytdlp, args, signal)
 
     let stderr = ''
     let filepath = ''
@@ -258,11 +337,11 @@ export function download(
     let totalParts = 1
     let lastDownloaded = 0
     let buffer = ''
-    // every file yt-dlp writes this run, so a cancel can clean up after itself
+    // files written this run, removed again on cancel
     const destinations: string[] = []
 
-    child.stdout.on('data', (chunk: Buffer) => {
-      buffer += chunk.toString()
+    child.stdout!.on('data', (chunk: string) => {
+      buffer += chunk
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
       for (const rawLine of lines) {
@@ -282,7 +361,7 @@ export function download(
             totalParts,
           })
         } else if (line.includes('Downloading 1 format(s):')) {
-          // "[info] xxx: Downloading 1 format(s): 395+251" — each id is one file
+          // "[info] xxx: Downloading 1 format(s): 395+251"
           totalParts = (line.split('format(s):')[1] ?? '').trim().split('+').length
         } else if (line.includes('[Merger]') || line.includes('[ExtractAudio]')) {
           const merging = /^\[Merger\] Merging formats into "(.+)"$/.exec(line)?.[1]
@@ -297,14 +376,13 @@ export function download(
         }
       }
     })
-    child.stderr.on('data', chunk => (stderr += chunk))
+    child.stderr!.on('data', chunk => (stderr += chunk))
     child.on('error', reject)
     child.on('close', code => {
-      activeChild = undefined
       if (signal?.aborted) {
-        // cancelled on purpose — don't leave half-written files behind
-        void removePartials(destinations)
-        reject(new Error('Download cancelled.'))
+        void killed()
+          .then(() => removePartials(destinations))
+          .then(() => reject(new Error('Download cancelled.')))
         return
       }
       if (code === 0 && filepath) {
@@ -316,11 +394,18 @@ export function download(
   })
 }
 
+/** True when a failure looks like an expired media link, the only case worth a fresh retry. */
+export function isExpiredLinkError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /HTTP Error (403|404|410)|expired/i.test(message)
+}
+
 function removePartials(destinations: string[]): Promise<unknown> {
   return Promise.allSettled(
     destinations
       .flatMap(dest => [dest, `${dest}.part`, `${dest}.ytdl`])
-      .map(file => fs.rm(file, {force: true})),
+      // Windows can hold the file a moment after the process dies
+      .map(file => fs.rm(file, {force: true, maxRetries: 5, retryDelay: 200})),
   )
 }
 

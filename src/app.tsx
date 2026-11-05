@@ -13,6 +13,7 @@ import {Shortcuts} from './components/shortcuts.js'
 import {TextInput} from './components/text-input.js'
 import {clickTargetAt, findFrameRow, frameRowSpan, type ClickTarget} from './lib/click-map.js'
 import {formatBytes, formatDuration, formatEta, formatSpeed, shortenPath, truncate, wrapText} from './lib/format.js'
+import {readClipboard} from './lib/clipboard.js'
 import {addToHistory, loadHistory} from './lib/history.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
 import {useMouseClick} from './lib/use-mouse-click.js'
@@ -22,7 +23,9 @@ import {
   download,
   ensureYtDlp,
   findFfmpeg,
+  isExpiredLinkError,
   probe,
+  removeInfoJson,
   type DownloadChoice,
   type DownloadProgress,
   type VideoInfo,
@@ -127,7 +130,6 @@ const HINTS: Record<Phase['name'], Array<[string, string]>> = {
 
 type AppProps = {
   initialUrl?: string
-  clipboardUrl?: string
   initialThemeMode?: ThemeMode
   onOutcome: (outcome: Outcome) => void
 }
@@ -147,12 +149,10 @@ export function App({initialThemeMode = 'auto', ...props}: AppProps) {
 
 function AppContent({
   initialUrl,
-  clipboardUrl,
   onOutcome,
   cycleTheme,
 }: {
   initialUrl?: string
-  clipboardUrl?: string
   onOutcome: (outcome: Outcome) => void
   cycleTheme: () => void
 }) {
@@ -169,13 +169,30 @@ function AppContent({
   const highlightRef = useRef(0) // choice under the cursor, for the ↵ hint click
   const infoJsonRef = useRef<string | undefined>(undefined)
   const abortRef = useRef<AbortController | undefined>(undefined)
+  const downloadRef = useRef<Promise<void> | undefined>(undefined)
+  const [clipboardUrl, setClipboardUrl] = useState<string>()
   const [phase, setPhase] = useState<Phase>(initialUrl ? {name: 'probing', status: 'warming up…'} : {name: 'input'})
 
   const columns = stdout?.columns && stdout.columns > 0 ? stdout.columns : 80
   const boxWidth = Math.max(14, Math.min(64, columns - 6))
   const contentWidth = Math.max(10, Math.min(columns - 4, 78))
 
+  // offer a link from the clipboard, read in the background so startup stays fast
+  useEffect(() => {
+    if (initialUrl || !process.stdout.isTTY) return
+    void readClipboard().then(text => {
+      const clipped = text.trim()
+      if (clipped && !/\s/.test(clipped) && isProbablyUrl(clipped)) setClipboardUrl(clipped)
+    })
+  }, [initialUrl])
+
+  const dropInfoJson = useCallback(() => {
+    removeInfoJson(infoJsonRef.current)
+    infoJsonRef.current = undefined
+  }, [])
+
   const startProbe = useCallback(async (targetUrl: string) => {
+    dropInfoJson()
     const controller = new AbortController()
     abortRef.current = controller
     setPlatform(detectPlatform(targetUrl))
@@ -198,20 +215,21 @@ function AppContent({
       if (controller.signal.aborted) return
       setPhase({name: 'error', message: error instanceof Error ? error.message : String(error)})
     }
-  }, [])
+  }, [dropInfoJson])
 
   useEffect(() => {
     if (initialUrl) void startProbe(initialUrl)
   }, [initialUrl, startProbe])
 
   const resetToInput = useCallback(() => {
+    dropInfoJson()
     setUrl('')
     setUrlInput('')
     setPlatform(undefined)
     setInfo(undefined)
     setChoices([])
     setPhase({name: 'input'})
-  }, [])
+  }, [dropInfoJson])
 
   const cancelRun = useCallback(() => {
     abortRef.current?.abort()
@@ -219,8 +237,18 @@ function AppContent({
     setUrlInput(url) // keep the link around so a cancel isn't destructive
   }, [resetToInput, url])
 
+  // stop a running download and let it delete its partial files before quitting
+  const quit = useCallback(() => {
+    abortRef.current?.abort()
+    void (downloadRef.current ?? Promise.resolve()).finally(() => exit())
+  }, [exit])
+
   useInput(
     (input, key) => {
+      if (key.ctrl && input === 'c') {
+        quit()
+        return
+      }
       if (key.ctrl && input === 't') {
         cycleTheme()
         return
@@ -247,10 +275,12 @@ function AppContent({
 
   const handlePick = (item: {value: number}) => {
     const choice = choices[item.value]
+    // a double click or double enter must not start two downloads
+    if (!choice || downloadRef.current) return
     const controller = new AbortController()
     abortRef.current = controller
     setPhase({name: 'downloading', choice, processing: false})
-    void (async () => {
+    downloadRef.current = (async () => {
       const handlers = {
         onProgress: (progress: DownloadProgress) =>
           setPhase(prev => (prev.name === 'downloading' ? {...prev, progress, processing: false} : prev)),
@@ -265,8 +295,8 @@ function AppContent({
           // reuse the probe's metadata — starts immediately instead of re-extracting
           filepath = await download({...base, infoJsonPath: infoJsonRef.current}, handlers, controller.signal)
         } catch (error) {
-          if (controller.signal.aborted) throw error
-          // media urls in the cached info can expire — retry with a fresh extraction
+          if (controller.signal.aborted || !isExpiredLinkError(error)) throw error
+          // the saved media link expired, so extract it again
           setPhase(prev =>
             prev.name === 'downloading' ? {...prev, progress: undefined, refreshing: true} : prev,
           )
@@ -278,6 +308,8 @@ function AppContent({
       } catch (error) {
         if (controller.signal.aborted) return
         setPhase({name: 'error', message: error instanceof Error ? error.message : String(error)})
+      } finally {
+        downloadRef.current = undefined
       }
     })()
   }
@@ -291,7 +323,7 @@ function AppContent({
   // found by their text in the rendered frame (see lib/click-map.ts), so
   // there is no layout math to keep in sync.
   const hintAction = (key: string): (() => void) | undefined => {
-    if (key === '^c') return () => exit()
+    if (key === '^c') return quit
     if (key === '^t') return cycleTheme
     if (key === 'esc') return phase.name === 'probing' || phase.name === 'downloading' ? cancelRun : resetToInput
     if (key === '↵') {

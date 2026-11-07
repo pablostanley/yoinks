@@ -50,6 +50,18 @@ click the theme control in the footer to cycle through `auto`, `light`, and
 `dark` for the current session. Use `--theme auto`, `--theme light`, or
 `--theme dark` to choose the starting theme for one launch.
 
+Press `^o` or click `^o settings` to configure additional yt-dlp arguments.
+They are used both when fetching video info and when downloading, and are
+saved in `~/.config/yoinks/settings.json`. For example:
+
+```text
+--cookies-from-browser firefox --js-runtimes node
+```
+
+Command-line-style quotes are supported for values containing spaces.
+Arguments are passed directly to yt-dlp without a shell. Press enter to save
+or `esc` to leave the dialog without changing the saved settings.
+
 <img src="assets/download-options.png" alt="yoinks format picker — resolutions with estimated file sizes, plus audio-only mp3" width="100%">
 
 ## How it works

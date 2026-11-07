@@ -103,9 +103,14 @@ export type ProbeResult = {
   infoJsonPath: string
 }
 
-export async function probe(ytdlp: string, url: string, signal?: AbortSignal): Promise<ProbeResult> {
+export async function probe(
+  ytdlp: string,
+  url: string,
+  signal?: AbortSignal,
+  extraArgs: string[] = [],
+): Promise<ProbeResult> {
   const stdout = await new Promise<string>((resolve, reject) => {
-    const child = spawn(ytdlp, ['-J', '--no-playlist', '--no-warnings', url], {signal})
+    const child = spawn(ytdlp, [...extraArgs, '-J', '--no-playlist', '--no-warnings', url], {signal})
     let out = ''
     let stderr = ''
     child.stdout.on('data', chunk => (out += chunk))
@@ -218,6 +223,7 @@ process.on('exit', () => activeChild?.kill('SIGTERM'))
 export function download(
   opts: {
     ytdlp: string
+    extraArgs: string[]
     ffmpegLocation?: string
     url: string
     /** When set, reuse the probe's metadata instead of re-extracting — starts much faster. */
@@ -229,6 +235,7 @@ export function download(
   signal?: AbortSignal,
 ): Promise<string> {
   const args = [
+    ...opts.extraArgs,
     ...(opts.infoJsonPath ? ['--load-info-json', opts.infoJsonPath] : [opts.url]),
     ...opts.choice.args,
     '--no-playlist',

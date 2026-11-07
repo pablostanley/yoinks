@@ -15,7 +15,9 @@ import {clickTargetAt, findFrameRow, frameRowSpan, type ClickTarget} from './lib
 import {formatBytes, formatDuration, formatEta, formatSpeed, shortenPath, truncate, wrapText} from './lib/format.js'
 import {addToHistory, loadHistory} from './lib/history.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
+import {loadSettings, saveSettings, type Settings} from './lib/settings.js'
 import {useMouseClick} from './lib/use-mouse-click.js'
+import {parseYtdlpArgs} from './lib/ytdlp-args.js'
 import {nextThemeMode, ThemeProvider, type ThemeMode, useTheme} from './theme.js'
 import {
   buildChoices,
@@ -87,6 +89,7 @@ export type Outcome = {filepath?: string}
 
 type Phase =
   | {name: 'input'; warning?: string}
+  | {name: 'settings'; error?: string}
   | {name: 'probing'; status: string}
   | {name: 'picking'}
   | {
@@ -102,6 +105,12 @@ type Phase =
 const HINTS: Record<Phase['name'], Array<[string, string]>> = {
   input: [
     ['↵', 'yoink'],
+    ['^o', 'settings'],
+    ['^c', 'quit'],
+  ],
+  settings: [
+    ['↵', 'save'],
+    ['esc', 'cancel'],
     ['^c', 'quit'],
   ],
   probing: [
@@ -162,10 +171,14 @@ function AppContent({
   const [url, setUrl] = useState(initialUrl ?? '')
   const [urlInput, setUrlInput] = useState('')
   const [history, setHistory] = useState(loadHistory)
+  const [settings, setSettings] = useState(loadSettings)
+  const settingsRef = useRef(settings.ytdlpArgs)
+  const [settingsInput, setSettingsInput] = useState('')
   const [platform, setPlatform] = useState<Platform>()
   const [info, setInfo] = useState<VideoInfo>()
   const [choices, setChoices] = useState<DownloadChoice[]>([])
   const ytdlpRef = useRef('')
+  const extraArgsRef = useRef<string[]>([])
   const highlightRef = useRef(0) // choice under the cursor, for the ↵ hint click
   const infoJsonRef = useRef<string | undefined>(undefined)
   const abortRef = useRef<AbortController | undefined>(undefined)
@@ -175,19 +188,39 @@ function AppContent({
   const boxWidth = Math.max(14, Math.min(64, columns - 6))
   const contentWidth = Math.max(10, Math.min(columns - 4, 78))
 
+  const openSettings = () => {
+    setSettingsInput(settings.ytdlpArgs)
+    setPhase({name: 'settings'})
+  }
+  const closeSettings = () => setPhase({name: 'input'})
+  const handleSettingsSubmit = (value: string) => {
+    try {
+      parseYtdlpArgs(value)
+      const next: Settings = {ytdlpArgs: value.trim()}
+      saveSettings(next)
+      settingsRef.current = next.ytdlpArgs
+      setSettings(next)
+      closeSettings()
+    } catch (error) {
+      setPhase({name: 'settings', error: error instanceof Error ? error.message : String(error)})
+    }
+  }
+
   const startProbe = useCallback(async (targetUrl: string) => {
     const controller = new AbortController()
     abortRef.current = controller
     setPlatform(detectPlatform(targetUrl))
     setPhase({name: 'probing', status: 'warming up…'})
     try {
+      const extraArgs = parseYtdlpArgs(settingsRef.current)
+      extraArgsRef.current = extraArgs
       const ytdlp =
         ytdlpRef.current ||
         (await ensureYtDlp(status => setPhase({name: 'probing', status}), controller.signal))
       ytdlpRef.current = ytdlp
       if (controller.signal.aborted) return
       setPhase({name: 'probing', status: 'fetching video info…'})
-      const {info: videoInfo, infoJsonPath} = await probe(ytdlp, targetUrl, controller.signal)
+      const {info: videoInfo, infoJsonPath} = await probe(ytdlp, targetUrl, controller.signal, extraArgs)
       if (controller.signal.aborted) return
       infoJsonRef.current = infoJsonPath
       setInfo(videoInfo)
@@ -225,6 +258,14 @@ function AppContent({
         cycleTheme()
         return
       }
+      if (key.ctrl && input === 'o' && phase.name === 'input') {
+        openSettings()
+        return
+      }
+      if (key.escape && phase.name === 'settings') {
+        closeSettings()
+        return
+      }
       if (key.escape && (phase.name === 'picking' || phase.name === 'error' || phase.name === 'done')) resetToInput()
       if (key.escape && (phase.name === 'probing' || phase.name === 'downloading')) cancelRun()
       if (key.return && (phase.name === 'error' || phase.name === 'done')) resetToInput()
@@ -259,7 +300,14 @@ function AppContent({
       }
       try {
         const ffmpegLocation = await findFfmpeg()
-        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, outDir: OUT_DIR}
+        const base = {
+          ytdlp: ytdlpRef.current,
+          extraArgs: extraArgsRef.current,
+          ffmpegLocation,
+          url,
+          choice,
+          outDir: OUT_DIR,
+        }
         let filepath: string
         try {
           // reuse the probe's metadata — starts immediately instead of re-extracting
@@ -293,9 +341,14 @@ function AppContent({
   const hintAction = (key: string): (() => void) | undefined => {
     if (key === '^c') return () => exit()
     if (key === '^t') return cycleTheme
-    if (key === 'esc') return phase.name === 'probing' || phase.name === 'downloading' ? cancelRun : resetToInput
+    if (key === '^o') return openSettings
+    if (key === 'esc') {
+      if (phase.name === 'settings') return closeSettings
+      return phase.name === 'probing' || phase.name === 'downloading' ? cancelRun : resetToInput
+    }
     if (key === '↵') {
       if (phase.name === 'input') return () => handleUrlSubmit(urlInput)
+      if (phase.name === 'settings') return () => handleSettingsSubmit(settingsInput)
       if (phase.name === 'picking') return () => handlePick({value: highlightRef.current})
       if (phase.name === 'error' || phase.name === 'done') return resetToInput
     }
@@ -327,6 +380,7 @@ function AppContent({
         const span = frameRowSpan(y - 1)
         if (span && x >= span[0] - 1 && x <= span[1] + 1) {
           if (phase.name === 'probing' || phase.name === 'downloading') cancelRun()
+          else if (phase.name === 'settings') closeSettings()
           else if (phase.name !== 'input') resetToInput()
           return
         }
@@ -368,6 +422,26 @@ function AppContent({
             <Text color={theme.gray} dimColor={theme.dimSecondary}>from your clipboard — ↵ to yoink it</Text>
           ) : null}
         </Box>
+      )}
+
+      {phase.name === 'settings' && (
+        <Panel title="yt-dlp settings" width={boxWidth}>
+          <Text color={theme.gray} dimColor={theme.dimSecondary}>
+            Additional arguments for info and downloads.
+          </Text>
+          <Gap />
+          <Box>
+            <Text color={theme.primary}>❯ </Text>
+            <TextInput
+              value={settingsInput}
+              onChange={setSettingsInput}
+              onSubmit={handleSettingsSubmit}
+              placeholder="--cookies-from-browser firefox --js-runtimes node"
+              width={boxWidth - 10}
+            />
+          </Box>
+          {phase.error ? <Text color={theme.primary}>✗ {phase.error}</Text> : null}
+        </Panel>
       )}
 
       {phase.name === 'probing' && (

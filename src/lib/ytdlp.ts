@@ -10,6 +10,11 @@ import {formatBytes} from './format.js'
 const YOINKS_DIR = path.join(os.homedir(), '.yoinks', 'bin')
 const RELEASE_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download'
 
+// On Windows, yt-dlp writes piped output with the legacy ANSI code page, so
+// non-ASCII filepaths printed for us arrive as mojibake once Node decodes them
+// as UTF-8. Force yt-dlp's own encoding so both sides agree.
+const UTF8_ARGS = ['--encoding', 'utf-8']
+
 function ytDlpAssetName(): string {
   if (process.platform === 'win32') return 'yt-dlp.exe'
   if (process.platform === 'darwin') return 'yt-dlp_macos'
@@ -110,7 +115,7 @@ export async function probe(
   extraArgs: string[] = [],
 ): Promise<ProbeResult> {
   const stdout = await new Promise<string>((resolve, reject) => {
-    const child = spawn(ytdlp, [...extraArgs, '-J', '--no-playlist', '--no-warnings', url], {signal})
+    const child = spawn(ytdlp, [...extraArgs, ...UTF8_ARGS, '-J', '--no-playlist', '--no-warnings', url], {signal})
     let out = ''
     let stderr = ''
     child.stdout.on('data', chunk => (out += chunk))
@@ -236,6 +241,7 @@ export function download(
 ): Promise<string> {
   const args = [
     ...opts.extraArgs,
+    ...UTF8_ARGS,
     ...(opts.infoJsonPath ? ['--load-info-json', opts.infoJsonPath] : [opts.url]),
     ...opts.choice.args,
     '--no-playlist',

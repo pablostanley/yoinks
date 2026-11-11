@@ -34,8 +34,15 @@ export type VideoClip = {
 
 const ASCII_RAMP = ' .:-=+*#%@'
 const DEFAULT_FETCH_TIMEOUT_MS = 8_000
-const DEFAULT_STREAM_ATTEMPT_TIMEOUT_MS = 10_000
+const DEFAULT_STREAM_ATTEMPT_TIMEOUT_MS = 5_000
+const DEFAULT_SECTION_TIMEOUT_MS = 14_000
+const DEFAULT_LOCAL_FALLBACK_TIMEOUT_MS = 30_000
 const MAX_BUFFER_BYTES = 32 * 1024 * 1024
+
+const AUDIO_ONLY_EXTS = new Set(['mp3', 'm4a', 'aac', 'opus', 'ogg', 'oga', 'wav', 'flac', 'weba'])
+const VIDEO_EXTS = new Set(['mp4', 'webm', 'mov', 'mkv', 'm4v', 'flv', 'ts', 'avi'])
+const FORBIDDEN_FETCH_HEADERS = new Set(['host', 'content-length', 'connection', 'accept-encoding', 'transfer-encoding'])
+const COOKIE_ATTRS = new Set(['domain', 'path', 'expires', 'max-age', 'samesite', 'secure', 'httponly', 'priority'])
 
 function linkAbortSignal(parent?: AbortSignal, timeoutMs?: number): {signal: AbortSignal; cleanup: () => void} {
   const controller = new AbortController()
@@ -70,11 +77,38 @@ function isMediaSource(url: string | undefined): url is string {
   return typeof url === 'string' && (/^https?:\/\//i.test(url) || url.startsWith('file://') || path.isAbsolute(url))
 }
 
+function sanitizeFetchHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
+  if (!headers) return undefined
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(headers)) {
+    if (!FORBIDDEN_FETCH_HEADERS.has(key.toLowerCase()) && value !== undefined) {
+      out[key] = value
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/**
+ * Convert yt-dlp's `Set-Cookie` style `cookies` string into a plain HTTP
+ * `Cookie` header (`name=value; ...`), stripping Domain/Path/Expires attributes.
+ */
+export function parseCookieHeader(rawCookies: string | undefined): string | undefined {
+  if (!rawCookies) return undefined
+  const pairs: string[] = []
+  for (const part of rawCookies.split(/;\s*/)) {
+    const eq = part.indexOf('=')
+    if (eq <= 0) continue
+    const name = part.slice(0, eq).trim()
+    if (!name || COOKIE_ATTRS.has(name.toLowerCase())) continue
+    pairs.push(`${name}=${part.slice(eq + 1).trim()}`)
+  }
+  return pairs.length > 0 ? pairs.join('; ') : undefined
+}
+
 function scoreThumbnail(t: {url: string; width?: number; preference?: number}): number {
   let score = 0
   if (typeof t.width === 'number' && t.width > 0) {
     if (t.width >= 320 && t.width <= 1280) {
-      // Crisp enough for HD Kitty graphics while still fast to fetch
       score += 10_000 - Math.abs(t.width - 480)
     } else if (t.width > 1280) {
       score += 5_000 - Math.min(4_000, t.width - 1280)
@@ -88,29 +122,43 @@ function scoreThumbnail(t: {url: string; width?: number; preference?: number}): 
   return score
 }
 
-/**
- * Return candidate thumbnail URLs ordered for fast, reliable terminal previewing.
- */
-export function pickThumbnailUrls(info: VideoInfo): string[] {
+type ThumbnailCandidate = {
+  url: string
+  headers?: Record<string, string>
+}
+
+function pickThumbnailCandidates(info: VideoInfo): ThumbnailCandidate[] {
   const ranked = (info.thumbnails ?? [])
-    .filter((t): t is {url: string; width?: number; preference?: number; id?: string} => {
+    .filter((t): t is {url: string; width?: number; preference?: number; id?: string; http_headers?: Record<string, string>} => {
       if (!isHttpUrl(t.url)) return false
       if (t.id?.startsWith('sb')) return false
       if (/\.mhtml(?:$|\?)/i.test(t.url)) return false
       return true
     })
     .sort((a, b) => scoreThumbnail(b) - scoreThumbnail(a))
-    .map(t => t.url)
+    .map(t => ({url: t.url, headers: mergeCookieHeader(t.http_headers ?? info.http_headers, info.cookies)}))
 
   const seen = new Set<string>()
-  const result: string[] = []
-  for (const url of [...ranked, ...(isHttpUrl(info.thumbnail) ? [info.thumbnail] : [])]) {
-    if (!seen.has(url)) {
-      seen.add(url)
-      result.push(url)
+  const result: ThumbnailCandidate[] = []
+  const fallbackHeaders = mergeCookieHeader(info.http_headers, info.cookies)
+  const all = [
+    ...ranked,
+    ...(isHttpUrl(info.thumbnail) ? [{url: info.thumbnail, headers: fallbackHeaders}] : []),
+  ]
+  for (const item of all) {
+    if (!seen.has(item.url)) {
+      seen.add(item.url)
+      result.push(item)
     }
   }
   return result
+}
+
+/**
+ * Return candidate thumbnail URLs ordered for fast, reliable terminal previewing.
+ */
+export function pickThumbnailUrls(info: VideoInfo): string[] {
+  return pickThumbnailCandidates(info).map(c => c.url)
 }
 
 function isYoutubeInfo(info: VideoInfo): boolean {
@@ -118,6 +166,22 @@ function isYoutubeInfo(info: VideoInfo): boolean {
     info.extractor_key?.toLowerCase() === 'youtube' ||
     Boolean(info.webpage_url && /(?:youtube\.com|youtu\.be)/i.test(info.webpage_url))
   )
+}
+
+/**
+ * Treat formats as video unless they are explicitly storyboards or audio-only.
+ * Many non-YouTube extractors (Instagram, TikTok, X, Reddit, generic) leave
+ * `vcodec` unset on MP4/HLS streams.
+ */
+export function isVideoFormat(f: RawFormat): boolean {
+  if (f.ext === 'mhtml' || f.protocol === 'mhtml') return false
+  if (f.vcodec === 'none') return false
+  if (f.vcodec && f.vcodec !== 'none') return true
+  if ((f.height && f.height > 0) || (f.width && f.width > 0)) return true
+  const ext = f.ext?.toLowerCase() ?? ''
+  if (AUDIO_ONLY_EXTS.has(ext)) return false
+  if (VIDEO_EXTS.has(ext)) return true
+  return !f.acodec || f.acodec === 'none'
 }
 
 function scorePreviewFormat(f: RawFormat, preferHls: boolean): number {
@@ -151,43 +215,45 @@ function scorePreviewFormat(f: RawFormat, preferHls: boolean): number {
   return score
 }
 
+function streamHostKey(url: string, protocol?: string): string {
+  try {
+    return `${protocol ?? 'http'}:${new URL(url).hostname}`
+  } catch {
+    return `${protocol ?? 'local'}:${url}`
+  }
+}
+
 /**
- * Return ordered candidate video streams for fast random clip extraction.
- * On YouTube, HLS (`m3u8_native`) is prioritized ahead of direct `https`
- * streams because direct adaptive URLs frequently 403 or throttle range seeks.
+ * Return ordered candidate video streams for fast random clip extraction,
+ * deduplicated by protocol + hostname so blocked CDNs don't waste repeated timeouts.
  */
 export function pickPreviewStreams(info: VideoInfo): PreviewStream[] {
   const preferHls = isYoutubeInfo(info)
   const candidates = (info.formats ?? [])
-    .filter(
-      f =>
-        f.vcodec &&
-        f.vcodec !== 'none' &&
-        f.ext !== 'mhtml' &&
-        f.protocol !== 'mhtml' &&
-        isMediaSource(f.url),
-    )
+    .filter(f => isVideoFormat(f) && isMediaSource(f.url))
     .sort((a, b) => scorePreviewFormat(b, preferHls) - scorePreviewFormat(a, preferHls))
 
   const result: PreviewStream[] = []
-  const seen = new Set<string>()
+  const seenHosts = new Set<string>()
   for (const f of candidates) {
-    if (seen.has(f.format_id)) continue
-    seen.add(f.format_id)
+    const key = streamHostKey(f.url!, f.protocol)
+    if (seenHosts.has(key)) continue
+    seenHosts.add(key)
+    const headers = mergeCookieHeader(f.http_headers ?? info.http_headers, f.cookies ?? info.cookies)
     result.push({
       formatId: f.format_id,
       url: f.url!,
       protocol: f.protocol,
-      headers: f.http_headers ?? info.http_headers,
+      headers,
     })
-    if (result.length >= 4) break
+    if (result.length >= 3) break
   }
 
   if (result.length === 0 && isMediaSource(info.url)) {
     result.push({
       formatId: 'best',
       url: info.url,
-      headers: info.http_headers,
+      headers: mergeCookieHeader(info.http_headers, info.cookies),
     })
   }
 
@@ -200,9 +266,9 @@ export function pickPreviewStream(info: VideoInfo): PreviewStream | undefined {
 
 export function hasVideoContent(info: VideoInfo): boolean {
   if (pickPreviewStream(info)) return true
-  return (info.formats ?? []).some(
-    f => Boolean(f.vcodec && f.vcodec !== 'none' && f.ext !== 'mhtml' && f.protocol !== 'mhtml'),
-  )
+  const formats = info.formats ?? []
+  if (formats.length === 0) return Boolean(info.webpage_url || info.url)
+  return formats.some(isVideoFormat)
 }
 
 /**
@@ -383,6 +449,17 @@ function runFfmpegBuffer(
   })
 }
 
+function mergeCookieHeader(
+  headers: Record<string, string> | undefined,
+  rawCookies: string | undefined,
+): Record<string, string> | undefined {
+  const parsed = parseCookieHeader(rawCookies)
+  if (!parsed) return headers
+  const hasCookie = headers && Object.keys(headers).some(k => k.toLowerCase() === 'cookie')
+  if (hasCookie) return headers
+  return {...headers, Cookie: parsed}
+}
+
 function splitHttpHeaders(headers: Record<string, string> | undefined): {
   userAgent?: string
   headersArg?: string
@@ -404,66 +481,166 @@ function splitHttpHeaders(headers: Record<string, string> | undefined): {
   }
 }
 
+async function decodeImageBuffer(opts: {
+  ffmpegPath: string
+  imageBytes: Buffer
+  pixelWidth: number
+  pixelHeight: number
+  mode: GraphicsMode
+  noColor?: boolean
+  signal: AbortSignal
+}): Promise<ThumbnailGraphic | undefined> {
+  const outputArgs =
+    opts.mode === 'kitty'
+      ? ['-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1']
+      : ['-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
+
+  const decoded = await runFfmpegBuffer(
+    opts.ffmpegPath,
+    [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-i',
+      'pipe:0',
+      '-vf',
+      buildScaleFilter(opts.pixelWidth, opts.pixelHeight),
+      ...outputArgs,
+    ],
+    opts.imageBytes,
+    opts.signal,
+  )
+
+  if (opts.mode === 'kitty') {
+    const pngs = splitPngStream(decoded)
+    return pngs[0] ? {png: pngs[0]} : undefined
+  }
+  const expectedRgbBytes = opts.pixelWidth * opts.pixelHeight * 3
+  if (decoded.length >= expectedRgbBytes) {
+    return {lines: renderRgbFrameToLines(decoded, opts.pixelWidth, opts.pixelHeight, {noColor: opts.noColor})}
+  }
+  return undefined
+}
+
+async function runYtDlpCommand(ytdlpPath: string, args: string[], signal: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(ytdlpPath, args, {stdio: 'ignore', signal})
+    child.on('error', reject)
+    child.on('close', code => (code === 0 ? resolve() : reject(new Error(`yt-dlp exited with code ${code}`))))
+  })
+}
+
+async function fetchThumbnailViaYtDlp(opts: {
+  ytdlpPath: string
+  ffmpegPath: string
+  infoJsonPath?: string
+  videoUrl?: string
+  pixelWidth: number
+  pixelHeight: number
+  mode: GraphicsMode
+  noColor?: boolean
+  signal?: AbortSignal
+}): Promise<ThumbnailGraphic | undefined> {
+  const sourceArgs = opts.infoJsonPath
+    ? [['--load-info-json', opts.infoJsonPath], ...(opts.videoUrl ? [[opts.videoUrl]] : [])]
+    : opts.videoUrl
+      ? [[opts.videoUrl]]
+      : []
+
+  for (const src of sourceArgs) {
+    if (opts.signal?.aborted) return undefined
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yoinks-thumb-'))
+    const {signal, cleanup} = linkAbortSignal(opts.signal, DEFAULT_FETCH_TIMEOUT_MS + 4_000)
+    try {
+      await runYtDlpCommand(
+        opts.ytdlpPath,
+        [...src, '--no-warnings', '--no-playlist', '--write-thumbnail', '--skip-download', '-o', path.join(tmpDir, 'thumb.%(ext)s')],
+        signal,
+      )
+      const files = (await fs.readdir(tmpDir)).filter(name => !name.endsWith('.part'))
+      for (const file of files) {
+        const imageBytes = await fs.readFile(path.join(tmpDir, file))
+        if (imageBytes.length === 0) continue
+        const graphic = await decodeImageBuffer({
+          ffmpegPath: opts.ffmpegPath,
+          imageBytes,
+          pixelWidth: opts.pixelWidth,
+          pixelHeight: opts.pixelHeight,
+          mode: opts.mode,
+          noColor: opts.noColor,
+          signal,
+        }).catch(() => undefined)
+        if (graphic) return graphic
+      }
+    } catch {
+      // try next source
+    } finally {
+      cleanup()
+      await fs.rm(tmpDir, {recursive: true, force: true}).catch(() => {})
+    }
+  }
+  return undefined
+}
+
 /**
  * Fetch and decode the video's thumbnail as either a crisp Kitty PNG or
- * truecolor half-block lines.
+ * truecolor half-block lines, falling back to `yt-dlp --write-thumbnail` if
+ * direct HTTP requests are blocked by a CDN.
  */
 export async function fetchThumbnailGraphic(opts: {
   ffmpegPath: string
   info: VideoInfo
   dims: PreviewDimensions
   mode?: GraphicsMode
+  ytdlpPath?: string
+  infoJsonPath?: string
+  videoUrl?: string
   noColor?: boolean
   signal?: AbortSignal
 }): Promise<ThumbnailGraphic | undefined> {
   const mode = opts.mode ?? 'halfblock'
-  const candidates = pickThumbnailUrls(opts.info).slice(0, 3)
-  if (candidates.length === 0) return undefined
-
+  const candidates = pickThumbnailCandidates(opts.info).slice(0, 4)
   const {pixelWidth, pixelHeight} = targetPixelDimensions(opts.dims, mode)
-  const expectedRgbBytes = pixelWidth * pixelHeight * 3
 
-  for (const url of candidates) {
+  for (const candidate of candidates) {
     if (opts.signal?.aborted) return undefined
     const {signal, cleanup} = linkAbortSignal(opts.signal, DEFAULT_FETCH_TIMEOUT_MS)
     try {
-      const response = await fetch(url, {headers: opts.info.http_headers, signal})
+      const headers = sanitizeFetchHeaders(candidate.headers)
+      const response = await fetch(candidate.url, {headers, signal})
       if (!response.ok) continue
       const imageBytes = Buffer.from(await response.arrayBuffer())
       if (imageBytes.length === 0) continue
 
-      const outputArgs =
-        mode === 'kitty'
-          ? ['-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1']
-          : ['-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
-
-      const decoded = await runFfmpegBuffer(
-        opts.ffmpegPath,
-        [
-          '-hide_banner',
-          '-loglevel',
-          'error',
-          '-i',
-          'pipe:0',
-          '-vf',
-          buildScaleFilter(pixelWidth, pixelHeight),
-          ...outputArgs,
-        ],
+      const graphic = await decodeImageBuffer({
+        ffmpegPath: opts.ffmpegPath,
         imageBytes,
+        pixelWidth,
+        pixelHeight,
+        mode,
+        noColor: opts.noColor,
         signal,
-      )
-
-      if (mode === 'kitty') {
-        const pngs = splitPngStream(decoded)
-        if (pngs[0]) return {png: pngs[0]}
-      } else if (decoded.length >= expectedRgbBytes) {
-        return {lines: renderRgbFrameToLines(decoded, pixelWidth, pixelHeight, {noColor: opts.noColor})}
-      }
+      })
+      if (graphic) return graphic
     } catch {
       if (opts.signal?.aborted) return undefined
     } finally {
       cleanup()
     }
+  }
+
+  if (opts.ytdlpPath && (opts.infoJsonPath || opts.videoUrl) && !opts.signal?.aborted) {
+    return fetchThumbnailViaYtDlp({
+      ytdlpPath: opts.ytdlpPath,
+      ffmpegPath: opts.ffmpegPath,
+      infoJsonPath: opts.infoJsonPath,
+      videoUrl: opts.videoUrl ?? opts.info.webpage_url,
+      pixelWidth,
+      pixelHeight,
+      mode,
+      noColor: opts.noColor,
+      signal: opts.signal,
+    })
   }
 
   return undefined
@@ -497,11 +674,57 @@ function sliceRgbFrames(
   return frames
 }
 
+async function decodeVideoInput(opts: {
+  ffmpegPath: string
+  input: string
+  startSec?: number
+  clipDurationSec: number
+  fps: number
+  pixelWidth: number
+  pixelHeight: number
+  mode: GraphicsMode
+  headers?: Record<string, string>
+  noColor?: boolean
+  signal: AbortSignal
+}): Promise<{frames: PreviewFrame[]; pngFrames?: Buffer[]}> {
+  const isHttp = /^https?:\/\//i.test(opts.input)
+  const {userAgent, headersArg} = isHttp ? splitHttpHeaders(opts.headers) : {}
+  const outputArgs =
+    opts.mode === 'kitty'
+      ? ['-f', 'image2pipe', '-vcodec', 'png', 'pipe:1']
+      : ['-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
+
+  const args = [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    ...(isHttp && userAgent ? ['-user_agent', userAgent] : []),
+    ...(isHttp && headersArg ? ['-headers', headersArg] : []),
+    ...(opts.startSec && opts.startSec > 0 ? ['-ss', opts.startSec.toFixed(2)] : []),
+    '-i',
+    opts.input,
+    '-t',
+    opts.clipDurationSec.toFixed(2),
+    '-an',
+    '-sn',
+    '-dn',
+    '-vf',
+    buildScaleFilter(opts.pixelWidth, opts.pixelHeight, opts.fps),
+    ...outputArgs,
+  ]
+
+  const decoded = await runFfmpegBuffer(opts.ffmpegPath, args, undefined, opts.signal)
+  if (opts.mode === 'kitty') {
+    return {frames: [], pngFrames: splitPngStream(decoded)}
+  }
+  return {frames: sliceRgbFrames(decoded, opts.pixelWidth, opts.pixelHeight, opts.noColor)}
+}
+
 async function fetchSectionViaYtDlp(opts: {
   ytdlpPath: string
   ffmpegPath: string
-  infoJsonPath: string
-  formatId: string
+  infoJsonPath?: string
+  videoUrl?: string
   startSec: number
   clipDurationSec: number
   fps: number
@@ -511,75 +734,117 @@ async function fetchSectionViaYtDlp(opts: {
   noColor?: boolean
   signal: AbortSignal
 }): Promise<{frames: PreviewFrame[]; pngFrames?: Buffer[]}> {
-  const tmpFile = path.join(os.tmpdir(), `yoinks-clip-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`)
+  const sourceArgs = opts.infoJsonPath
+    ? [['--load-info-json', opts.infoJsonPath], ...(opts.videoUrl ? [[opts.videoUrl]] : [])]
+    : opts.videoUrl
+      ? [[opts.videoUrl]]
+      : []
+
   const endSec = (opts.startSec + opts.clipDurationSec).toFixed(2)
-  const args = [
-    '--load-info-json',
-    opts.infoJsonPath,
-    '--no-warnings',
-    '--no-playlist',
-    '-f',
-    opts.formatId,
-    '--download-sections',
-    `*${opts.startSec.toFixed(2)}-${endSec}`,
-    '-o',
-    tmpFile,
-  ]
-  if (opts.ffmpegPath !== 'ffmpeg') {
-    args.push('--ffmpeg-location', opts.ffmpegPath)
-  }
+  for (const src of sourceArgs) {
+    if (opts.signal.aborted) break
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yoinks-clip-'))
+    try {
+      const args = [
+        ...src,
+        '--no-warnings',
+        '--no-playlist',
+        '-f',
+        'bv*[height<=480]/bv*/b',
+        '--download-sections',
+        `*${opts.startSec.toFixed(2)}-${endSec}`,
+        '-o',
+        path.join(tmpDir, 'clip.%(ext)s'),
+      ]
+      if (opts.ffmpegPath !== 'ffmpeg') args.push('--ffmpeg-location', opts.ffmpegPath)
 
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(opts.ytdlpPath, args, {stdio: 'ignore', signal: opts.signal})
-      child.on('error', reject)
-      child.on('close', code => {
-        if (code === 0) resolve()
-        else reject(new Error(`yt-dlp exited with code ${code}`))
-      })
-    })
-    const outputArgs =
-      opts.mode === 'kitty'
-        ? ['-f', 'image2pipe', '-vcodec', 'png', 'pipe:1']
-        : ['-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
-
-    const decoded = await runFfmpegBuffer(
-      opts.ffmpegPath,
-      [
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        '-i',
-        tmpFile,
-        '-an',
-        '-sn',
-        '-dn',
-        '-vf',
-        buildScaleFilter(opts.pixelWidth, opts.pixelHeight, opts.fps),
-        ...outputArgs,
-      ],
-      undefined,
-      opts.signal,
-    )
-    if (opts.mode === 'kitty') {
-      const pngFrames = splitPngStream(decoded)
-      return {frames: [], pngFrames}
+      await runYtDlpCommand(opts.ytdlpPath, args, opts.signal)
+      const files = (await fs.readdir(tmpDir)).filter(name => !name.endsWith('.part') && !name.endsWith('.ytdl'))
+      for (const file of files) {
+        const result = await decodeVideoInput({
+          ffmpegPath: opts.ffmpegPath,
+          input: path.join(tmpDir, file),
+          clipDurationSec: opts.clipDurationSec,
+          fps: opts.fps,
+          pixelWidth: opts.pixelWidth,
+          pixelHeight: opts.pixelHeight,
+          mode: opts.mode,
+          noColor: opts.noColor,
+          signal: opts.signal,
+        })
+        if ((opts.mode === 'kitty' && result.pngFrames && result.pngFrames.length > 0) || result.frames.length > 0) {
+          return result
+        }
+      }
+    } catch {
+      // try next source
+    } finally {
+      await fs.rm(tmpDir, {recursive: true, force: true}).catch(() => {})
     }
-    return {frames: sliceRgbFrames(decoded, opts.pixelWidth, opts.pixelHeight, opts.noColor)}
-  } finally {
-    await fs.rm(tmpFile, {force: true}).catch(() => {})
   }
+  return {frames: []}
 }
 
 /**
- * Extract a short video clip starting at `startSec`. Tries candidate streams in
- * order (with fast per-attempt timeouts) before falling back to `yt-dlp`
- * section downloading.
+ * Download a compact low-res preview video via yt-dlp into a temporary
+ * directory when streaming/section extraction fails or for short clips.
+ */
+export async function downloadLocalPreviewFile(opts: {
+  ytdlpPath: string
+  ffmpegPath: string
+  infoJsonPath?: string
+  videoUrl?: string
+  signal?: AbortSignal
+}): Promise<{dir: string; filePath: string} | undefined> {
+  const sourceArgs = opts.infoJsonPath
+    ? [['--load-info-json', opts.infoJsonPath], ...(opts.videoUrl ? [[opts.videoUrl]] : [])]
+    : opts.videoUrl
+      ? [[opts.videoUrl]]
+      : []
+
+  for (const src of sourceArgs) {
+    if (opts.signal?.aborted) return undefined
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yoinks-preview-'))
+    const {signal, cleanup} = linkAbortSignal(opts.signal, DEFAULT_LOCAL_FALLBACK_TIMEOUT_MS)
+    try {
+      const args = [
+        ...src,
+        '--no-warnings',
+        '--no-playlist',
+        '-f',
+        'bv*[height<=480]/wv*/bv*/b',
+        '--max-filesize',
+        '60M',
+        '-o',
+        path.join(tmpDir, 'preview.%(ext)s'),
+      ]
+      if (opts.ffmpegPath !== 'ffmpeg') args.push('--ffmpeg-location', opts.ffmpegPath)
+
+      await runYtDlpCommand(opts.ytdlpPath, args, signal)
+      const files = (await fs.readdir(tmpDir)).filter(name => !name.endsWith('.part') && !name.endsWith('.ytdl'))
+      if (files[0]) {
+        return {dir: tmpDir, filePath: path.join(tmpDir, files[0])}
+      }
+      await fs.rm(tmpDir, {recursive: true, force: true}).catch(() => {})
+    } catch {
+      await fs.rm(tmpDir, {recursive: true, force: true}).catch(() => {})
+    } finally {
+      cleanup()
+    }
+  }
+  return undefined
+}
+
+/**
+ * Extract a short video clip starting at `startSec`. Tries cached local file,
+ * fast direct `ffmpeg` stream seeking, and `yt-dlp --download-sections`.
  */
 export async function fetchVideoClip(opts: {
   ffmpegPath: string
   ytdlpPath?: string
   infoJsonPath?: string
+  videoUrl?: string
+  localFilePath?: string
   stream?: PreviewStream
   streams?: PreviewStream[]
   startSec: number
@@ -594,7 +859,39 @@ export async function fetchVideoClip(opts: {
   const clipDurationSec = opts.clipDurationSec ?? 2.5
   const fps = opts.fps ?? 10
   const {pixelWidth, pixelHeight} = targetPixelDimensions(opts.dims, mode)
-  const candidates = opts.streams ?? (opts.stream ? [opts.stream] : [])
+
+  if (opts.localFilePath) {
+    const {signal, cleanup} = linkAbortSignal(opts.signal, DEFAULT_STREAM_ATTEMPT_TIMEOUT_MS)
+    try {
+      for (const seekSec of opts.startSec > 0 ? [opts.startSec, 0] : [0]) {
+        const result = await decodeVideoInput({
+          ffmpegPath: opts.ffmpegPath,
+          input: opts.localFilePath,
+          startSec: seekSec,
+          clipDurationSec,
+          fps,
+          pixelWidth,
+          pixelHeight,
+          mode,
+          noColor: opts.noColor,
+          signal,
+        })
+        if (mode === 'kitty' && result.pngFrames && result.pngFrames.length > 0) {
+          return {startSec: seekSec, fps, frames: [], pngFrames: result.pngFrames}
+        }
+        if (result.frames.length > 0) {
+          return {startSec: seekSec, fps, frames: result.frames}
+        }
+      }
+    } catch {
+      return undefined
+    } finally {
+      cleanup()
+    }
+    return undefined
+  }
+
+  const candidates = (opts.streams ?? (opts.stream ? [opts.stream] : [])).slice(0, 2)
 
   for (const stream of candidates) {
     if (opts.signal?.aborted) return undefined
@@ -602,43 +899,24 @@ export async function fetchVideoClip(opts: {
 
     const {signal, cleanup} = linkAbortSignal(opts.signal, DEFAULT_STREAM_ATTEMPT_TIMEOUT_MS)
     try {
-      const {userAgent, headersArg} = splitHttpHeaders(stream.headers)
-      const isHttp = /^https?:\/\//i.test(stream.url)
-      const outputArgs =
-        mode === 'kitty'
-          ? ['-f', 'image2pipe', '-vcodec', 'png', 'pipe:1']
-          : ['-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
-
-      const args = [
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        ...(isHttp && userAgent ? ['-user_agent', userAgent] : []),
-        ...(isHttp && headersArg ? ['-headers', headersArg] : []),
-        ...(opts.startSec > 0 ? ['-ss', opts.startSec.toFixed(2)] : []),
-        '-i',
-        stream.url,
-        '-t',
-        clipDurationSec.toFixed(2),
-        '-an',
-        '-sn',
-        '-dn',
-        '-vf',
-        buildScaleFilter(pixelWidth, pixelHeight, fps),
-        ...outputArgs,
-      ]
-
-      const decoded = await runFfmpegBuffer(opts.ffmpegPath, args, undefined, signal)
-      if (mode === 'kitty') {
-        const pngFrames = splitPngStream(decoded)
-        if (pngFrames.length > 0) {
-          return {startSec: opts.startSec, fps, frames: [], pngFrames, stream}
-        }
-      } else {
-        const frames = sliceRgbFrames(decoded, pixelWidth, pixelHeight, opts.noColor)
-        if (frames.length > 0) {
-          return {startSec: opts.startSec, fps, frames, stream}
-        }
+      const result = await decodeVideoInput({
+        ffmpegPath: opts.ffmpegPath,
+        input: stream.url,
+        startSec: opts.startSec,
+        clipDurationSec,
+        fps,
+        pixelWidth,
+        pixelHeight,
+        mode,
+        headers: stream.headers,
+        noColor: opts.noColor,
+        signal,
+      })
+      if (mode === 'kitty' && result.pngFrames && result.pngFrames.length > 0) {
+        return {startSec: opts.startSec, fps, frames: [], pngFrames: result.pngFrames, stream}
+      }
+      if (result.frames.length > 0) {
+        return {startSec: opts.startSec, fps, frames: result.frames, stream}
       }
     } catch {
       if (opts.signal?.aborted) return undefined
@@ -647,15 +925,14 @@ export async function fetchVideoClip(opts: {
     }
   }
 
-  const fallbackFormat = candidates[0]?.formatId
-  if (opts.ytdlpPath && opts.infoJsonPath && fallbackFormat && !opts.signal?.aborted) {
-    const {signal, cleanup} = linkAbortSignal(opts.signal, DEFAULT_STREAM_ATTEMPT_TIMEOUT_MS + 4_000)
+  if (opts.ytdlpPath && (opts.infoJsonPath || opts.videoUrl) && !opts.signal?.aborted) {
+    const {signal, cleanup} = linkAbortSignal(opts.signal, DEFAULT_SECTION_TIMEOUT_MS)
     try {
       const result = await fetchSectionViaYtDlp({
         ytdlpPath: opts.ytdlpPath,
         ffmpegPath: opts.ffmpegPath,
         infoJsonPath: opts.infoJsonPath,
-        formatId: fallbackFormat,
+        videoUrl: opts.videoUrl,
         startSec: opts.startSec,
         clipDurationSec,
         fps,

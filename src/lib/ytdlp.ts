@@ -89,6 +89,7 @@ export type RawThumbnail = {
   height?: number
   preference?: number
   id?: string
+  http_headers?: Record<string, string>
 }
 
 export type VideoInfo = {
@@ -101,6 +102,7 @@ export type VideoInfo = {
   thumbnails?: RawThumbnail[]
   url?: string
   http_headers?: Record<string, string>
+  cookies?: string
   formats?: RawFormat[]
 }
 
@@ -109,6 +111,7 @@ export type RawFormat = {
   url?: string
   protocol?: string
   http_headers?: Record<string, string>
+  cookies?: string
   ext?: string
   vcodec?: string
   acodec?: string

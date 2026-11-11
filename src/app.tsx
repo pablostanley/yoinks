@@ -482,6 +482,7 @@ function AppContent({
                   <Gap />
                   <VideoPreview
                     info={info}
+                    videoUrl={url}
                     infoJsonPath={infoJsonRef.current}
                     ytdlpPath={ytdlpRef.current || undefined}
                     width={previewWidth}

@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises'
 import React, {useCallback, useEffect, useRef, useState} from 'react'
 import {Box, Text, useStdout} from 'ink'
 import Spinner from 'ink-spinner'
@@ -5,6 +6,7 @@ import {setPreviewOverlay} from '../lib/click-map.js'
 import {formatDuration, truncate} from '../lib/format.js'
 import type {GraphicsMode} from '../lib/terminal-graphics.js'
 import {
+  downloadLocalPreviewFile,
   fetchThumbnailGraphic,
   fetchVideoClip,
   hasVideoContent,
@@ -27,6 +29,7 @@ let nextGraphicSeq = 1
 
 type VideoPreviewProps = {
   info: VideoInfo
+  videoUrl?: string
   infoJsonPath?: string
   ytdlpPath?: string
   width: number
@@ -66,8 +69,18 @@ function clipLength(clip: VideoClip | undefined, mode: GraphicsMode): number {
   return mode === 'kitty' ? (clip.pngFrames?.length ?? 0) : clip.frames.length
 }
 
+function firstClipThumbnail(clip: VideoClip, mode: GraphicsMode): ThumbnailGraphic | undefined {
+  if (mode === 'kitty') {
+    const png = clip.pngFrames?.[0]
+    return png ? {png} : undefined
+  }
+  const lines = clip.frames[0]
+  return lines ? {lines} : undefined
+}
+
 export function VideoPreview({
   info,
+  videoUrl,
   infoJsonPath,
   ytdlpPath,
   width,
@@ -93,6 +106,10 @@ export function VideoPreview({
   const ffmpegRef = useRef<string | undefined>(undefined)
   const abortRef = useRef<AbortController | undefined>(undefined)
   const workingStreamRef = useRef<PreviewStream | undefined>(undefined)
+  const localPreviewDirRef = useRef<string | undefined>(undefined)
+  const localPreviewFileRef = useRef<string | undefined>(undefined)
+  const localFallbackTriedRef = useRef(false)
+  const thumbnailRef = useRef<ThumbnailGraphic | undefined>(undefined)
   const clipsRef = useRef<VideoClip[]>([])
   const activeClipIndexRef = useRef(0)
   const frameIndexRef = useRef(0)
@@ -102,6 +119,7 @@ export function VideoPreview({
   const prevHoverRef = useRef(isHovered)
   const prevSkipRef = useRef(skipClipTrigger)
 
+  thumbnailRef.current = thumbnail
   clipsRef.current = clips
   activeClipIndexRef.current = activeClipIndex
   frameIndexRef.current = frameIndex
@@ -113,14 +131,15 @@ export function VideoPreview({
       const signal = abortRef.current?.signal
       if (!ffmpegPath || !signal || signal.aborted) return
       if (!videoExists || fetchingClipRef.current) return
-      if (failuresRef.current >= 2 && clipsRef.current.length === 0) return
+      if (failuresRef.current >= 3 && clipsRef.current.length === 0) return
 
       const candidateStreams = pickPreviewStreams(info)
       const orderedStreams = workingStreamRef.current
         ? [workingStreamRef.current, ...candidateStreams.filter(s => s.formatId !== workingStreamRef.current!.formatId)]
         : candidateStreams
 
-      if (orderedStreams.length === 0 && !(ytdlpPath && infoJsonPath)) {
+      const hasYtDlpSource = Boolean(ytdlpPath && (infoJsonPath || videoUrl || info.webpage_url))
+      if (orderedStreams.length === 0 && !localPreviewFileRef.current && !hasYtDlpSource) {
         setClipsUnavailable(true)
         return
       }
@@ -131,10 +150,17 @@ export function VideoPreview({
         recentStartsRef.current.push(startSec)
         if (recentStartsRef.current.length > 12) recentStartsRef.current.shift()
 
-        const clip = await fetchVideoClip({
+        const resolvedUrl = videoUrl ?? info.webpage_url
+        const isShortVideo = typeof info.duration === 'number' && info.duration > 0 && info.duration <= 90
+
+        // For short videos, skip slow per-clip yt-dlp sections when direct streaming
+        // fails and cache a single compact local copy for instant multi-clip seeking.
+        let clip = await fetchVideoClip({
           ffmpegPath,
-          ytdlpPath,
+          ytdlpPath: isShortVideo ? undefined : ytdlpPath,
           infoJsonPath,
+          videoUrl: resolvedUrl,
+          localFilePath: localPreviewFileRef.current,
           streams: orderedStreams,
           startSec,
           clipDurationSec: CLIP_DURATION_SEC,
@@ -144,20 +170,69 @@ export function VideoPreview({
           signal,
         })
 
+        if (
+          (!clip || clipLength(clip, graphicsMode) === 0) &&
+          !localPreviewFileRef.current &&
+          !localFallbackTriedRef.current &&
+          hasYtDlpSource &&
+          !signal.aborted
+        ) {
+          localFallbackTriedRef.current = true
+          const local = await downloadLocalPreviewFile({
+            ytdlpPath: ytdlpPath!,
+            ffmpegPath,
+            infoJsonPath,
+            videoUrl: resolvedUrl,
+            signal,
+          })
+          if (local && !signal.aborted) {
+            localPreviewDirRef.current = local.dir
+            localPreviewFileRef.current = local.filePath
+            clip = await fetchVideoClip({
+              ffmpegPath,
+              localFilePath: local.filePath,
+              startSec,
+              clipDurationSec: CLIP_DURATION_SEC,
+              fps: CLIP_FPS,
+              dims: {cols: imageCols, rows: imageRows},
+              mode: graphicsMode,
+              signal,
+            })
+          } else if (isShortVideo && !signal.aborted) {
+            clip = await fetchVideoClip({
+              ffmpegPath,
+              ytdlpPath,
+              infoJsonPath,
+              videoUrl: resolvedUrl,
+              streams: [],
+              startSec,
+              clipDurationSec: CLIP_DURATION_SEC,
+              fps: CLIP_FPS,
+              dims: {cols: imageCols, rows: imageRows},
+              mode: graphicsMode,
+              signal,
+            })
+          }
+        }
+
         if (signal.aborted) return
         if (clip && clipLength(clip, graphicsMode) > 0) {
           failuresRef.current = 0
           if (clip.stream) workingStreamRef.current = clip.stream
+          if (!thumbnailRef.current) {
+            const fallbackThumb = firstClipThumbnail(clip, graphicsMode)
+            if (fallbackThumb) setThumbnail(fallbackThumb)
+          }
           setClips(prev => {
             if (prev.length >= MAX_CACHED_CLIPS) {
               if (!forceReplace) return prev
-              return [...prev.slice(1), clip]
+              return [...prev.slice(1), clip!]
             }
-            return [...prev, clip]
+            return [...prev, clip!]
           })
         } else {
           failuresRef.current += 1
-          if (failuresRef.current >= 2 && clipsRef.current.length === 0) {
+          if (failuresRef.current >= 3 && clipsRef.current.length === 0) {
             setClipsUnavailable(true)
           }
         }
@@ -165,7 +240,7 @@ export function VideoPreview({
         fetchingClipRef.current = false
       }
     },
-    [graphicsMode, imageCols, imageRows, info, infoJsonPath, videoExists, ytdlpPath],
+    [graphicsMode, imageCols, imageRows, info, infoJsonPath, videoExists, videoUrl, ytdlpPath],
   )
 
   // Load thumbnail and prefetch the first random clip whenever video or preview size changes
@@ -173,6 +248,8 @@ export function VideoPreview({
     const controller = new AbortController()
     abortRef.current = controller
     workingStreamRef.current = undefined
+    localPreviewFileRef.current = undefined
+    localFallbackTriedRef.current = false
     clipsRef.current = []
     activeClipIndexRef.current = 0
     frameIndexRef.current = 0
@@ -204,6 +281,9 @@ export function VideoPreview({
         info,
         dims: {cols: imageCols, rows: imageRows},
         mode: graphicsMode,
+        ytdlpPath,
+        infoJsonPath,
+        videoUrl: videoUrl ?? info.webpage_url,
         signal: controller.signal,
       })
       if (controller.signal.aborted) return
@@ -217,8 +297,12 @@ export function VideoPreview({
 
     return () => {
       controller.abort()
+      const dir = localPreviewDirRef.current
+      localPreviewDirRef.current = undefined
+      localPreviewFileRef.current = undefined
+      if (dir) void fs.rm(dir, {recursive: true, force: true}).catch(() => {})
     }
-  }, [graphicsMode, imageCols, imageRows, info, loadAnotherClip, videoExists])
+  }, [graphicsMode, imageCols, imageRows, info, infoJsonPath, loadAnotherClip, videoExists, videoUrl, ytdlpPath])
 
   // Clear manual playback when mouse leaves, and rotate clip when hovering back in
   useEffect(() => {
@@ -327,6 +411,7 @@ export function VideoPreview({
   }, [stdout])
 
   const hasReadyGraphic = Boolean(shownPng || shownLines)
+  const stillFetchingFallbackThumb = !thumbnail && videoExists && !clipsUnavailable && !ffmpegMissing && clips.length === 0
 
   return (
     <Panel title="Preview" width={width} paddingX={1} highlight={isPlaying}>
@@ -335,7 +420,7 @@ export function VideoPreview({
           Array.from({length: imageRows}, (_, idx) => <Text key={idx}>{' '.repeat(imageCols)}</Text>)
         ) : shownLines ? (
           shownLines.map((row, idx) => <Text key={idx}>{row}</Text>)
-        ) : !thumbnailDone ? (
+        ) : !thumbnailDone || stillFetchingFallbackThumb ? (
           <Text color={theme.gray} dimColor={theme.dimSecondary}>
             <Text color={theme.primary}>
               <Spinner type="dots" />

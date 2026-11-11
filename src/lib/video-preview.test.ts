@@ -6,10 +6,13 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import {
+  downloadLocalPreviewFile,
   fetchThumbnailFrame,
   fetchThumbnailGraphic,
   fetchVideoClip,
   hasVideoContent,
+  isVideoFormat,
+  parseCookieHeader,
   pickPreviewStream,
   pickPreviewStreams,
   pickRandomClipTimestamp,
@@ -70,8 +73,7 @@ test('pickPreviewStreams prefers HLS m3u8_native on YouTube and keeps progressiv
 
   const streams = pickPreviewStreams(ytInfo)
   assert.equal(streams[0]?.formatId, '229')
-  assert.equal(streams[1]?.formatId, '269')
-  assert.equal(streams[2]?.formatId, '133')
+  assert.equal(streams[1]?.formatId, '133')
 })
 
 test('hasVideoContent returns false for audio-only metadata', () => {
@@ -81,6 +83,28 @@ test('hasVideoContent returns false for audio-only metadata', () => {
   }
   assert.equal(pickPreviewStream(info), undefined)
   assert.equal(hasVideoContent(info), false)
+})
+
+test('isVideoFormat and pickPreviewStreams accept streams with omitted vcodec (e.g. Instagram/TikTok/X)', () => {
+  const socialInfo: VideoInfo = {
+    title: 'Social Clip',
+    formats: [
+      {format_id: 'mp4-sd', ext: 'mp4', height: 480, protocol: 'https', url: 'https://cdn.ex/clip.mp4'},
+      {format_id: 'audio', ext: 'mp3', acodec: 'mp3', url: 'https://cdn.ex/a.mp3'},
+    ],
+  }
+  assert.equal(isVideoFormat(socialInfo.formats![0]!), true)
+  assert.equal(isVideoFormat(socialInfo.formats![1]!), false)
+  assert.equal(hasVideoContent(socialInfo), true)
+  assert.equal(pickPreviewStream(socialInfo)?.formatId, 'mp4-sd')
+
+  // When formats array is empty on single-stream extractors, still treat webpage_url as video candidate
+  assert.equal(hasVideoContent({title: 'Generic', webpage_url: 'https://example.com/v', formats: []}), true)
+
+  assert.equal(
+    parseCookieHeader('ttwid=abc; Domain=.tiktok.com; Path=/; Secure; Expires=123; tt_chain_token="xyz"; HttpOnly'),
+    'ttwid=abc; tt_chain_token="xyz"',
+  )
 })
 
 test('pickRandomClipTimestamp respects short durations and avoids repeating recent timestamps', () => {
@@ -231,6 +255,84 @@ test('fetchThumbnailFrame and fetchVideoClip decode real media with ffmpeg', asy
       })
       assert.ok(kittyClip?.pngFrames && kittyClip.pngFrames.length >= 5)
       assert.ok(kittyClip.pngFrames[0]!.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])))
+
+      // Verify sanitized headers strip Host/Content-Length without crashing fetch
+      const thumbWithBadHeaders = await fetchThumbnailGraphic({
+        ffmpegPath,
+        info: {
+          ...info,
+          http_headers: {Host: 'bad.invalid', 'Content-Length': '999', 'User-Agent': 'test-agent'},
+        },
+        dims: {cols: 16, rows: 5},
+        mode: 'halfblock',
+      })
+      assert.ok(thumbWithBadHeaders?.lines)
+
+      // Verify yt-dlp fallback for thumbnails, sections, and local preview file download
+      const infoJsonPath = path.join(tmpDir, 'info.json')
+      await fs.writeFile(infoJsonPath, JSON.stringify(info))
+      const mockYtDlp = path.join(tmpDir, 'mock-ytdlp.mjs')
+      await fs.writeFile(
+        mockYtDlp,
+        `#!/usr/bin/env node
+import fs from 'node:fs';
+const args = process.argv.slice(2);
+const outIdx = args.indexOf('-o');
+const tpl = outIdx !== -1 ? args[outIdx + 1] : '';
+if (args.includes('--write-thumbnail')) {
+  fs.copyFileSync(${JSON.stringify(thumbPath)}, tpl.replace('%(ext)s', 'png'));
+} else {
+  fs.copyFileSync(${JSON.stringify(videoPath)}, tpl.replace('%(ext)s', 'mp4'));
+}
+`,
+      )
+      await fs.chmod(mockYtDlp, 0o755)
+
+      const fallbackThumb = await fetchThumbnailGraphic({
+        ffmpegPath,
+        ytdlpPath: mockYtDlp,
+        infoJsonPath,
+        info: {title: 'Blocked Thumb', thumbnail: 'http://127.0.0.1:1/404.png'},
+        dims: {cols: 16, rows: 5},
+        mode: 'halfblock',
+      })
+      assert.ok(fallbackThumb?.lines && fallbackThumb.lines.length === 5)
+
+      const fallbackSectionClip = await fetchVideoClip({
+        ffmpegPath,
+        ytdlpPath: mockYtDlp,
+        infoJsonPath,
+        streams: [{formatId: 'bad', url: 'http://127.0.0.1:1/403.mp4', protocol: 'https'}],
+        startSec: 1.0,
+        clipDurationSec: 0.8,
+        fps: 10,
+        dims: {cols: 16, rows: 5},
+        mode: 'halfblock',
+      })
+      assert.ok(fallbackSectionClip && fallbackSectionClip.frames.length >= 5)
+
+      const local = await downloadLocalPreviewFile({
+        ytdlpPath: mockYtDlp,
+        ffmpegPath,
+        infoJsonPath,
+      })
+      assert.ok(local)
+      try {
+        // Seeking past video duration cleanly falls back to 0s on local file
+        const localClip = await fetchVideoClip({
+          ffmpegPath,
+          localFilePath: local.filePath,
+          startSec: 99,
+          clipDurationSec: 0.8,
+          fps: 10,
+          dims: {cols: 16, rows: 5},
+          mode: 'halfblock',
+        })
+        assert.ok(localClip && localClip.frames.length >= 5)
+        assert.equal(localClip.startSec, 0)
+      } finally {
+        await fs.rm(local.dir, {recursive: true, force: true})
+      }
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()))
     }

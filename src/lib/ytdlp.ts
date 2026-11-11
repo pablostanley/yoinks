@@ -10,6 +10,10 @@ import {formatBytes} from './format.js'
 const YOINKS_DIR = path.join(os.homedir(), '.yoinks', 'bin')
 const RELEASE_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download'
 
+export function resolveOutDir(cwd = process.cwd()): string {
+  return path.resolve(cwd)
+}
+
 function ytDlpAssetName(): string {
   if (process.platform === 'win32') return 'yt-dlp.exe'
   if (process.platform === 'darwin') return 'yt-dlp_macos'

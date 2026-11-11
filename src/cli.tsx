@@ -6,6 +6,7 @@ import {captureFrames} from './lib/click-map.js'
 import {parseArgs} from './lib/args.js'
 import {readClipboard} from './lib/clipboard.js'
 import {isProbablyUrl} from './lib/platforms.js'
+import {resolveOutDir} from './lib/ytdlp.js'
 
 // read at runtime from the shipped package.json so npm version bumps
 // can't drift from a hardcoded constant
@@ -27,7 +28,7 @@ const HELP = `
     -h, --help      show this help
     -v, --version   show version
 
-  Downloads are saved to ~/Downloads.
+  Downloads are saved to the current directory.
   Powered by yt-dlp — YouTube, X, Instagram, Threads, TikTok & 1800+ sites.
 `
 
@@ -79,12 +80,14 @@ if (isTTY) {
   }
 }
 
+const outDir = resolveOutDir()
 let outcome: Outcome = {}
 const {waitUntilExit} = render(
   <App
     initialUrl={initialUrl}
     clipboardUrl={clipboardUrl}
     initialThemeMode={initialThemeMode}
+    outDir={outDir}
     onOutcome={result => (outcome = result)}
   />,
   // keep a copy of every frame so clicks can be hit-tested against it

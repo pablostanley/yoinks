@@ -1,6 +1,5 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react'
 import os from 'node:os'
-import path from 'node:path'
 import {Box, Text, useApp, useInput, useStdout} from 'ink'
 import SelectInput, {type IndicatorProps, type ItemProps} from 'ink-select-input'
 import Spinner from 'ink-spinner'
@@ -23,12 +22,12 @@ import {
   ensureYtDlp,
   findFfmpeg,
   probe,
+  resolveOutDir,
   type DownloadChoice,
   type DownloadProgress,
   type VideoInfo,
 } from './lib/ytdlp.js'
 
-const OUT_DIR = path.join(os.homedir(), 'Downloads')
 const YOINK_BUTTON = 'yoink'
 const DONE_LABEL = '↵ yoink another'
 const TAGLINE = 'yoink any video. paste. yoink. done.'
@@ -129,6 +128,7 @@ type AppProps = {
   initialUrl?: string
   clipboardUrl?: string
   initialThemeMode?: ThemeMode
+  outDir?: string
   onOutcome: (outcome: Outcome) => void
 }
 
@@ -148,11 +148,13 @@ export function App({initialThemeMode = 'auto', ...props}: AppProps) {
 function AppContent({
   initialUrl,
   clipboardUrl,
+  outDir,
   onOutcome,
   cycleTheme,
 }: {
   initialUrl?: string
   clipboardUrl?: string
+  outDir?: string
   onOutcome: (outcome: Outcome) => void
   cycleTheme: () => void
 }) {
@@ -259,7 +261,7 @@ function AppContent({
       }
       try {
         const ffmpegLocation = await findFfmpeg()
-        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, outDir: OUT_DIR}
+        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, outDir: resolveOutDir(outDir)}
         let filepath: string
         try {
           // reuse the probe's metadata — starts immediately instead of re-extracting

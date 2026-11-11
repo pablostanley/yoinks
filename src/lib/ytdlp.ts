@@ -59,12 +59,10 @@ export async function ensureYtDlp(onStatus: (message: string) => void, signal?: 
 }
 
 /**
- * Find ffmpeg for stream merging / mp3 extraction: system install first,
- * ffmpeg-static as fallback. Returns undefined if neither exists — yt-dlp
- * still works for single-file formats without it.
+ * Resolve a runnable ffmpeg binary: system PATH first, ffmpeg-static fallback.
  */
-export async function findFfmpeg(): Promise<string | undefined> {
-  if (await commandWorks('ffmpeg', ['-version'])) return undefined // on PATH, yt-dlp finds it itself
+export async function resolveFfmpegExecutable(): Promise<string | undefined> {
+  if (await commandWorks('ffmpeg', ['-version'])) return 'ffmpeg'
   try {
     const mod = await import('ffmpeg-static')
     const ffmpegPath = (mod.default ?? mod) as unknown as string | null
@@ -75,22 +73,51 @@ export async function findFfmpeg(): Promise<string | undefined> {
   return undefined
 }
 
+/**
+ * Find ffmpeg for stream merging / mp3 extraction: system install first,
+ * ffmpeg-static as fallback. Returns undefined if on PATH (yt-dlp finds it
+ * itself) or when neither exists.
+ */
+export async function findFfmpeg(): Promise<string | undefined> {
+  const executable = await resolveFfmpegExecutable()
+  return executable === 'ffmpeg' ? undefined : executable
+}
+
+export type RawThumbnail = {
+  url?: string
+  width?: number
+  height?: number
+  preference?: number
+  id?: string
+  http_headers?: Record<string, string>
+}
+
 export type VideoInfo = {
   title: string
   uploader?: string
   duration?: number
   webpage_url?: string
   extractor_key?: string
+  thumbnail?: string
+  thumbnails?: RawThumbnail[]
+  url?: string
+  http_headers?: Record<string, string>
+  cookies?: string
   formats?: RawFormat[]
 }
 
-type RawFormat = {
+export type RawFormat = {
   format_id: string
+  url?: string
+  protocol?: string
+  http_headers?: Record<string, string>
+  cookies?: string
   ext?: string
   vcodec?: string
   acodec?: string
   height?: number
   width?: number
+  fps?: number
   abr?: number
   tbr?: number
   filesize?: number

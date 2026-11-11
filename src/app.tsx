@@ -11,10 +11,19 @@ import {Panel} from './components/panel.js'
 import {ProgressBar} from './components/progress-bar.js'
 import {Shortcuts} from './components/shortcuts.js'
 import {TextInput} from './components/text-input.js'
-import {clickTargetAt, findFrameRow, frameRowSpan, type ClickTarget} from './lib/click-map.js'
+import {VideoPreview} from './components/video-preview.js'
+import {
+  clickTargetAt,
+  findFrameRow,
+  findPanelRect,
+  frameRowSpan,
+  pointInRect,
+  type ClickTarget,
+} from './lib/click-map.js'
 import {formatBytes, formatDuration, formatEta, formatSpeed, shortenPath, truncate, wrapText} from './lib/format.js'
 import {addToHistory, loadHistory} from './lib/history.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
+import type {GraphicsMode} from './lib/terminal-graphics.js'
 import {useMouseClick} from './lib/use-mouse-click.js'
 import {nextThemeMode, ThemeProvider, type ThemeMode, useTheme} from './theme.js'
 import {
@@ -129,6 +138,7 @@ type AppProps = {
   initialUrl?: string
   clipboardUrl?: string
   initialThemeMode?: ThemeMode
+  graphicsMode?: GraphicsMode
   onOutcome: (outcome: Outcome) => void
 }
 
@@ -148,11 +158,13 @@ export function App({initialThemeMode = 'auto', ...props}: AppProps) {
 function AppContent({
   initialUrl,
   clipboardUrl,
+  graphicsMode = 'halfblock',
   onOutcome,
   cycleTheme,
 }: {
   initialUrl?: string
   clipboardUrl?: string
+  graphicsMode?: GraphicsMode
   onOutcome: (outcome: Outcome) => void
   cycleTheme: () => void
 }) {
@@ -169,11 +181,40 @@ function AppContent({
   const highlightRef = useRef(0) // choice under the cursor, for the ↵ hint click
   const infoJsonRef = useRef<string | undefined>(undefined)
   const abortRef = useRef<AbortController | undefined>(undefined)
+  const previewHoverRef = useRef(false)
+  const [isPreviewHovered, setIsPreviewHovered] = useState(false)
+  const [previewClickTrigger, setPreviewClickTrigger] = useState(0)
   const [phase, setPhase] = useState<Phase>(initialUrl ? {name: 'probing', status: 'warming up…'} : {name: 'input'})
 
-  const columns = stdout?.columns && stdout.columns > 0 ? stdout.columns : 80
+  const readTermSize = useCallback(
+    () => ({
+      columns: stdout?.columns && stdout.columns > 0 ? stdout.columns : 80,
+      rows: stdout?.rows && stdout.rows > 1 ? stdout.rows : 24,
+    }),
+    [stdout],
+  )
+  const [termSize, setTermSize] = useState(readTermSize)
+
+  useEffect(() => {
+    if (!stdout) return
+    const onResize = () => setTermSize(readTermSize())
+    stdout.on('resize', onResize)
+    return () => {
+      stdout.off('resize', onResize)
+    }
+  }, [readTermSize, stdout])
+
+  const {columns, rows} = termSize
   const boxWidth = Math.max(14, Math.min(64, columns - 6))
-  const contentWidth = Math.max(10, Math.min(columns - 4, 78))
+  const pickingWidth = Math.max(10, Math.min(columns - 6, 98))
+
+  useEffect(() => {
+    if (phase.name !== 'picking') {
+      previewHoverRef.current = false
+      setIsPreviewHovered(false)
+      setPreviewClickTrigger(0)
+    }
+  }, [phase.name])
 
   const startProbe = useCallback(async (targetUrl: string) => {
     const controller = new AbortController()
@@ -228,6 +269,9 @@ function AppContent({
       if (key.escape && (phase.name === 'picking' || phase.name === 'error' || phase.name === 'done')) resetToInput()
       if (key.escape && (phase.name === 'probing' || phase.name === 'downloading')) cancelRun()
       if (key.return && (phase.name === 'error' || phase.name === 'done')) resetToInput()
+      if (phase.name === 'picking' && (input === 'p' || input === 'P')) {
+        setPreviewClickTrigger(c => c + 1)
+      }
     },
     {isActive: Boolean(process.stdin.isTTY)},
   )
@@ -331,9 +375,28 @@ function AppContent({
           return
         }
       }
+      if (phase.name === 'picking') {
+        const previewRect = findPanelRect('Preview')
+        if (previewRect && pointInRect(x, y, previewRect)) {
+          setPreviewClickTrigger(c => c + 1)
+          return
+        }
+      }
       clickTargetAt(x, y, clickTargets)?.action()
     },
     Boolean(process.stdin.isTTY),
+    {
+      trackHover: phase.name === 'picking',
+      onMove: (x, y) => {
+        if (phase.name !== 'picking') return
+        const previewRect = findPanelRect('Preview')
+        const hovered = previewRect ? pointInRect(x, y, previewRect) : false
+        if (hovered !== previewHoverRef.current) {
+          previewHoverRef.current = hovered
+          setIsPreviewHovered(hovered)
+        }
+      },
+    },
   )
 
   return (
@@ -378,38 +441,75 @@ function AppContent({
         </Box>
       )}
 
-      {phase.name === 'picking' && platform && (
-        <Box width={contentWidth}>
-          <Box flexDirection="column" flexGrow={1} flexBasis={0} paddingTop={1} paddingRight={3}>
-            {/* wrapped by hand so continuation lines stay flush left —
-                ink's wrapping keeps the break's space as a 1-cell indent */}
-            {wrapText(info?.title ?? '', Math.max(10, contentWidth - 41)).map((line, index) => (
-              <Text key={index} bold color={theme.primary}>
-                {line}
+      {phase.name === 'picking' && platform && (() => {
+        const leftColWidth = Math.max(10, pickingWidth - 41)
+        const rawTitleLines = wrapText(info?.title ?? '', leftColWidth)
+        const maxTitleLines = rows < 26 ? 2 : 3
+        const titleLines =
+          rawTitleLines.length > maxTitleLines
+            ? [
+                ...rawTitleLines.slice(0, maxTitleLines - 1),
+                truncate(rawTitleLines.slice(maxTitleLines - 1).join(' '), leftColWidth),
+              ]
+            : rawTitleLines
+        const metaText = truncate(
+          `▸ ${platform.label}${info?.duration ? ` · ${formatDuration(info.duration)}` : ''}${info?.uploader ? ` · ${info.uploader}` : ''}`,
+          leftColWidth,
+        )
+        const tightRows = rows < 27
+        const maxImageRows = rows - 1 - 10 - ((tightRows ? 0 : 1) + titleLines.length + 6)
+        const previewImageRows = Math.min(13, maxImageRows)
+        const ideal16by9Width = Math.round(previewImageRows * 2 * (16 / 9)) + 4
+        const previewWidth = Math.min(leftColWidth, Math.max(24, ideal16by9Width))
+        const showPreview = Boolean(info) && previewWidth >= 18 && previewImageRows >= 4
+
+        return (
+          <Box width={pickingWidth}>
+            <Box flexDirection="column" flexGrow={1} flexBasis={0} paddingTop={tightRows ? 0 : 1} paddingRight={3}>
+              {/* wrapped by hand so continuation lines stay flush left —
+                  ink's wrapping keeps the break's space as a 1-cell indent */}
+              {titleLines.map((line, index) => (
+                <Text key={index} bold color={theme.primary}>
+                  {line}
+                </Text>
+              ))}
+              <Gap />
+              <Text color={theme.gray} dimColor={theme.dimSecondary}>
+                {metaText}
               </Text>
-            ))}
-            <Gap />
-            <Text color={theme.gray} dimColor={theme.dimSecondary}>
-              ▸ {platform.label}
-              {info?.duration ? ` · ${formatDuration(info.duration)}` : ''}
-              {info?.uploader ? ` · ${info.uploader}` : ''}
-            </Text>
+              {showPreview && info && (
+                <>
+                  <Gap />
+                  <VideoPreview
+                    info={info}
+                    videoUrl={url}
+                    infoJsonPath={infoJsonRef.current}
+                    ytdlpPath={ytdlpRef.current || undefined}
+                    width={previewWidth}
+                    imageRows={previewImageRows}
+                    isHovered={isPreviewHovered}
+                    skipClipTrigger={previewClickTrigger}
+                    graphicsMode={graphicsMode}
+                  />
+                </>
+              )}
+            </Box>
+            <Panel title="Download" width={38}>
+              <SelectInput
+                indicatorComponent={ChoiceIndicator}
+                itemComponent={ChoiceItem}
+                items={choices.map((choice, index) => ({
+                  key: String(index),
+                  label: choiceLabel(choice),
+                  value: index,
+                }))}
+                onSelect={handlePick}
+                onHighlight={item => (highlightRef.current = item.value)}
+              />
+            </Panel>
           </Box>
-          <Panel title="Download" width={38}>
-            <SelectInput
-              indicatorComponent={ChoiceIndicator}
-              itemComponent={ChoiceItem}
-              items={choices.map((choice, index) => ({
-                key: String(index),
-                label: choiceLabel(choice),
-                value: index,
-              }))}
-              onSelect={handlePick}
-              onHighlight={item => (highlightRef.current = item.value)}
-            />
-          </Panel>
-        </Box>
-      )}
+        )
+      })()}
 
       {phase.name === 'downloading' && (
         <Box flexDirection="column" alignItems="center">

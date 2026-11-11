@@ -6,6 +6,7 @@ import {captureFrames} from './lib/click-map.js'
 import {parseArgs} from './lib/args.js'
 import {readClipboard} from './lib/clipboard.js'
 import {isProbablyUrl} from './lib/platforms.js'
+import {detectTerminalGraphics, encodeKittyDelete} from './lib/terminal-graphics.js'
 
 // read at runtime from the shipped package.json so npm version bumps
 // can't drift from a hardcoded constant
@@ -60,9 +61,12 @@ if (!initialUrl && isTTY) {
   // reject multi-line clipboard content — new URL() silently strips newlines
   if (clipped && !/\s/.test(clipped) && isProbablyUrl(clipped)) clipboardUrl = clipped
 }
+const graphicsMode = isTTY ? await detectTerminalGraphics() : 'halfblock'
+
 const enterAltScreen = () => process.stdout.write('\x1b[?1049h\x1b[H')
-// also switch mouse tracking off — a crash can skip React effect cleanup
-const leaveAltScreen = () => process.stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?1049l')
+// also switch mouse tracking and graphics off — a crash can skip React effect cleanup
+const leaveAltScreen = () =>
+  process.stdout.write(`${graphicsMode === 'kitty' ? encodeKittyDelete() : ''}\x1b[?1003l\x1b[?1006l\x1b[?1000l\x1b[?1049l`)
 
 if (isTTY) {
   enterAltScreen()
@@ -85,6 +89,7 @@ const {waitUntilExit} = render(
     initialUrl={initialUrl}
     clipboardUrl={clipboardUrl}
     initialThemeMode={initialThemeMode}
+    graphicsMode={graphicsMode}
     onOutcome={result => (outcome = result)}
   />,
   // keep a copy of every frame so clicks can be hit-tested against it

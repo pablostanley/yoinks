@@ -44,6 +44,9 @@ button, the format list and the footer hints are all clickable, and
 clicking the logo takes you back home. Files are saved to `~/Downloads`,
 and the file path is printed to your terminal when you're done.
 
+Once a download finishes, press `o` to open the file or `f` to open its
+folder with the file selected — or click the buttons.
+
 The default `auto` theme uses your terminal's own foreground and background,
 so it follows light and dark terminal themes without guessing. Press `^t` or
 click the theme control in the footer to cycle through `auto`, `light`, and

@@ -14,6 +14,7 @@ import {TextInput} from './components/text-input.js'
 import {clickTargetAt, findFrameRow, frameRowSpan, type ClickTarget} from './lib/click-map.js'
 import {formatBytes, formatDuration, formatEta, formatSpeed, shortenPath, truncate, wrapText} from './lib/format.js'
 import {addToHistory, loadHistory} from './lib/history.js'
+import {openFile, revealFile} from './lib/open.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
 import {useMouseClick} from './lib/use-mouse-click.js'
 import {nextThemeMode, ThemeProvider, type ThemeMode, useTheme} from './theme.js'
@@ -31,6 +32,8 @@ import {
 const OUT_DIR = path.join(os.homedir(), 'Downloads')
 const YOINK_BUTTON = 'yoink'
 const DONE_LABEL = '↵ yoink another'
+const OPEN_FILE_LABEL = 'o open file'
+const OPEN_FOLDER_LABEL = 'f open folder'
 const TAGLINE = 'yoink any video. paste. yoink. done.'
 
 const choiceLabel = (choice: DownloadChoice) => `${choice.kind === 'audio' ? '♪ ' : '▶ '}${choice.label}`
@@ -96,7 +99,7 @@ type Phase =
       processing: boolean
       refreshing?: boolean
     }
-  | {name: 'done'; filepath: string}
+  | {name: 'done'; filepath: string; warning?: string}
   | {name: 'error'; message: string}
 
 const HINTS: Record<Phase['name'], Array<[string, string]>> = {
@@ -219,12 +222,24 @@ function AppContent({
     setUrlInput(url) // keep the link around so a cancel isn't destructive
   }, [resetToInput, url])
 
+  // open the finished file, or show it in the file manager
+  const launch = (action: (filepath: string) => Promise<boolean>) => {
+    if (phase.name !== 'done') return
+    const {filepath} = phase
+    void action(filepath).then(opened => {
+      const warning = opened ? undefined : 'couldn’t open that — the file may have been moved'
+      setPhase(prev => (prev.name === 'done' && prev.filepath === filepath ? {...prev, warning} : prev))
+    })
+  }
+
   useInput(
     (input, key) => {
       if (key.ctrl && input === 't') {
         cycleTheme()
         return
       }
+      if (phase.name === 'done' && input === 'o') launch(openFile)
+      if (phase.name === 'done' && input === 'f') launch(revealFile)
       if (key.escape && (phase.name === 'picking' || phase.name === 'error' || phase.name === 'done')) resetToInput()
       if (key.escape && (phase.name === 'probing' || phase.name === 'downloading')) cancelRun()
       if (key.return && (phase.name === 'error' || phase.name === 'done')) resetToInput()
@@ -313,6 +328,8 @@ function AppContent({
   }
   if (phase.name === 'done') {
     clickTargets.push({match: DONE_LABEL, padX: 4, padY: 1, action: resetToInput})
+    clickTargets.push({match: OPEN_FILE_LABEL, padX: 3, padY: 1, action: () => launch(openFile)})
+    clickTargets.push({match: OPEN_FOLDER_LABEL, padX: 3, padY: 1, action: () => launch(revealFile)})
   }
   for (const [key, label] of hints) {
     const action = hintAction(key)
@@ -471,7 +488,24 @@ function AppContent({
             <Text color={theme.primary}>find your file in:</Text>
           </Text>
           <Text color={theme.gray} dimColor={theme.dimSecondary}>{shortenPath(phase.filepath, os.homedir(), 60)}</Text>
+          {phase.warning ? (
+            <Text color={theme.gray} dimColor={theme.dimSecondary}>✗ {phase.warning}</Text>
+          ) : null}
           <Gap />
+          <Box columnGap={1}>
+            {[OPEN_FILE_LABEL, OPEN_FOLDER_LABEL].map(label => (
+              <Box
+                key={label}
+                borderStyle="round"
+                borderColor={theme.gray}
+                borderDimColor={theme.dimSecondary}
+                borderBackgroundColor={theme.background}
+                paddingX={2}
+              >
+                <Text color={theme.primary}>{label}</Text>
+              </Box>
+            ))}
+          </Box>
           <Box
             borderStyle="round"
             borderColor={theme.gray}

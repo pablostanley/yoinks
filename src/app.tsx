@@ -1,6 +1,5 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react'
 import os from 'node:os'
-import path from 'node:path'
 import {Box, Text, useApp, useInput, useStdout} from 'ink'
 import SelectInput, {type IndicatorProps, type ItemProps} from 'ink-select-input'
 import Spinner from 'ink-spinner'
@@ -12,6 +11,7 @@ import {ProgressBar} from './components/progress-bar.js'
 import {Shortcuts} from './components/shortcuts.js'
 import {TextInput} from './components/text-input.js'
 import {clickTargetAt, findFrameRow, frameRowSpan, type ClickTarget} from './lib/click-map.js'
+import {findDownloadsDir} from './lib/downloads-dir.js'
 import {formatBytes, formatDuration, formatEta, formatSpeed, shortenPath, truncate, wrapText} from './lib/format.js'
 import {addToHistory, loadHistory} from './lib/history.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
@@ -28,7 +28,6 @@ import {
   type VideoInfo,
 } from './lib/ytdlp.js'
 
-const OUT_DIR = path.join(os.homedir(), 'Downloads')
 const YOINK_BUTTON = 'yoink'
 const DONE_LABEL = '↵ yoink another'
 const TAGLINE = 'yoink any video. paste. yoink. done.'
@@ -204,6 +203,12 @@ function AppContent({
     if (initialUrl) void startProbe(initialUrl)
   }, [initialUrl, startProbe])
 
+  useEffect(() => {
+    // asked early so the answer is ready by the time a format is picked —
+    // on windows the lookup costs a powershell launch
+    void findDownloadsDir()
+  }, [])
+
   const resetToInput = useCallback(() => {
     setUrl('')
     setUrlInput('')
@@ -258,8 +263,8 @@ function AppContent({
           setPhase(prev => (prev.name === 'downloading' ? {...prev, processing: true} : prev)),
       }
       try {
-        const ffmpegLocation = await findFfmpeg()
-        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, outDir: OUT_DIR}
+        const [ffmpegLocation, outDir] = await Promise.all([findFfmpeg(), findDownloadsDir()])
+        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, outDir}
         let filepath: string
         try {
           // reuse the probe's metadata — starts immediately instead of re-extracting

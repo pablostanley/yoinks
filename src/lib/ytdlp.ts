@@ -181,7 +181,26 @@ export function buildChoices(info: VideoInfo): DownloadChoice[] {
   choices.push({
     kind: 'audio',
     label: `audio only · mp3${audioSizeLabel}`,
-    args: ['-f', 'ba/b', '-x', '--audio-format', 'mp3', '--audio-quality', '0'],
+    args: [
+      '-f',
+      'ba/b',
+      '-x',
+      '--audio-format',
+      'mp3',
+      '--audio-quality',
+      '0',
+      // Split an "Artist - Title" video title into the two tags. yt-dlp falls
+      // through silently when the title does not match the pattern, so a
+      // plain title keeps whatever --embed-metadata writes.
+      '--parse-metadata',
+      'title:(?P<artist>.+?) - (?P<title>.+)',
+      // Write the tags into the mp3: without this the file only carries the
+      // raw filename and every player shows an empty title.
+      '--embed-metadata',
+      // Embed the video thumbnail as the album cover. ffmpeg is already a hard
+      // requirement for mp3 extraction, so this needs nothing new.
+      '--embed-thumbnail',
+    ],
   })
 
   return choices

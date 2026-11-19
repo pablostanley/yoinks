@@ -56,7 +56,9 @@ click the theme control in the footer to cycle through `auto`, `light`, and
 
 - Powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp). On first run,
   yoinks downloads the standalone yt-dlp binary to `~/.yoinks/bin` —
-  no Python required. If you already have yt-dlp installed, it uses yours.
+  no Python required. If you already have a recent yt-dlp installed (under 60
+  days old), it uses yours; otherwise it uses its own copy and keeps it
+  updated with `yt-dlp -U`.
 - ffmpeg (needed for merging high-res streams and mp3 extraction) is found
   on your PATH, with `ffmpeg-static` as a bundled fallback.
 - The UI is [Ink](https://github.com/vadimdemedes/ink) — React for the
@@ -81,7 +83,7 @@ To try it as a global command without publishing: `npm link`, then run
 - [ ] `-o <dir>` to choose the output folder
 - [ ] Playlist / thread-with-multiple-videos support
 - [ ] Clipboard detection: launch bare and auto-suggest the url you copied
-- [ ] Self-update for the bundled yt-dlp binary (`yt-dlp -U`)
+- [x] Self-update for the bundled yt-dlp binary (`yt-dlp -U`)
 - [x] Publish to npm (`npm i -g yoinks` / `npx yoinks`)
 - [ ] `curl yoinks.sh | sh` installer
 

@@ -8,6 +8,9 @@ import {pipeline} from 'node:stream/promises'
 import {formatBytes} from './format.js'
 
 const YOINKS_DIR = path.join(os.homedir(), '.yoinks', 'bin')
+// YouTube changes often enough that a yt-dlp older than this fails with
+// "Requested format is not available" — don't trust it, even from the system
+const MAX_AGE_DAYS = 60
 const RELEASE_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download'
 
 function ytDlpAssetName(): string {
@@ -32,22 +35,62 @@ function commandWorks(cmd: string, args: string[]): Promise<boolean> {
   })
 }
 
+// yt-dlp versions are dates ("2024.04.09", sometimes with a ".NN" suffix)
+function commandOutput(cmd: string, args: string[]): Promise<string | undefined> {
+  return new Promise(resolve => {
+    let child
+    try {
+      child = spawn(cmd, args, {stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000})
+    } catch {
+      resolve(undefined)
+      return
+    }
+    let out = ''
+    child.stdout.on('data', chunk => (out += chunk))
+    child.on('error', () => resolve(undefined))
+    child.on('close', code => resolve(code === 0 ? out.trim() : undefined))
+  })
+}
+
+/** true = fresh, false = too old, undefined = not runnable. Unparseable versions count as fresh. */
+async function isFresh(cmd: string): Promise<boolean | undefined> {
+  const version = await commandOutput(cmd, ['--version'])
+  if (version === undefined) return undefined
+  const match = /^(\d{4})\.(\d{2})\.(\d{2})/.exec(version)
+  if (!match) return true
+  const released = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+  return Date.now() - released <= MAX_AGE_DAYS * 86_400_000
+}
+
 /**
- * Resolve a usable yt-dlp binary: system install first, then a previously
- * downloaded copy, then download the standalone binary from GitHub releases.
+ * Resolve a usable yt-dlp binary: a fresh system install first, then our own
+ * copy (self-updated if it has gone stale), downloading it from GitHub
+ * releases if missing. A stale system install is only a last resort.
  */
 export async function ensureYtDlp(onStatus: (message: string) => void, signal?: AbortSignal): Promise<string> {
-  if (await commandWorks('yt-dlp', ['--version'])) return 'yt-dlp'
+  const system = await isFresh('yt-dlp')
+  if (system) return 'yt-dlp'
 
   const local = path.join(YOINKS_DIR, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp')
-  if (await commandWorks(local, ['--version'])) return local
+  const own = await isFresh(local)
+  if (own) return local
+  if (own === false) {
+    onStatus('updating yt-dlp…')
+    await commandWorks(local, ['-U']) // best effort; offline just keeps the old copy
+    if (await commandWorks(local, ['--version'])) return local
+  }
 
   onStatus('first run: fetching yt-dlp…')
   await fs.mkdir(YOINKS_DIR, {recursive: true})
 
   const url = `${RELEASE_BASE}/${ytDlpAssetName()}`
-  const response = await fetch(url, {signal})
+  const response = await fetch(url, {signal}).catch(error => {
+    if (system === false) return undefined // offline: stale system yt-dlp beats nothing
+    throw error
+  })
+  if (!response) return 'yt-dlp'
   if (!response.ok || !response.body) {
+    if (system === false) return 'yt-dlp'
     throw new Error(`Could not download yt-dlp (${response.status}). Check your connection and try again.`)
   }
 

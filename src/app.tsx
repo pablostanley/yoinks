@@ -1,6 +1,5 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react'
 import os from 'node:os'
-import path from 'node:path'
 import {Box, Text, useApp, useInput, useStdout} from 'ink'
 import SelectInput, {type IndicatorProps, type ItemProps} from 'ink-select-input'
 import Spinner from 'ink-spinner'
@@ -17,6 +16,7 @@ import {addToHistory, loadHistory} from './lib/history.js'
 import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
 import {useMouseClick} from './lib/use-mouse-click.js'
 import {nextThemeMode, ThemeProvider, type ThemeMode, useTheme} from './theme.js'
+import {getDownloadDir} from './lib/downloadDir.js'
 import {
   buildChoices,
   download,
@@ -28,7 +28,7 @@ import {
   type VideoInfo,
 } from './lib/ytdlp.js'
 
-const OUT_DIR = path.join(os.homedir(), 'Downloads')
+const OUT_DIR = getDownloadDir()
 const YOINK_BUTTON = 'yoink'
 const DONE_LABEL = '↵ yoink another'
 const TAGLINE = 'yoink any video. paste. yoink. done.'

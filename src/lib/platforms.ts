@@ -32,6 +32,21 @@ export function detectPlatform(url: string): Platform {
   return {key: 'generic', label: hostname}
 }
 
+/**
+ * True when a url resolves to a single video but also points at a playlist
+ * around it — a youtube "watch?v=…&list=…" link. yt-dlp defaults to just the
+ * video there (a bare autoplay mix would otherwise be hundreds of items), so
+ * the playlist behind it is worth offering rather than assuming either way.
+ */
+export function hasPlaylistParam(url: string): boolean {
+  try {
+    const list = new URL(url.trim()).searchParams.get('list')
+    return Boolean(list && list.length > 0)
+  } catch {
+    return false
+  }
+}
+
 export function isProbablyUrl(input: string): boolean {
   try {
     const u = new URL(input.trim())

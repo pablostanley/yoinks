@@ -35,7 +35,30 @@ automatically.
 $ yoinks https://youtu.be/dQw4w9WgXcQ    # straight to the format picker
 $ yoinks                                 # prompts for a url
 $ yoinks --theme light                   # force the light palette
+$ yoinks https://youtube.com/playlist?list=PL123   # the whole playlist
 ```
+
+## Playlists
+
+Paste a playlist link and the picker offers resolution caps (`up to 720p`)
+instead of a ladder of exact formats — every video in a playlist is
+different, so there is nothing single to measure. Files land in their own
+folder under `~/Downloads`, numbered in playlist order:
+
+```
+~/Downloads/My playlist/001 - first video.mp4
+~/Downloads/My playlist/002 - second video.mp4
+```
+
+Items that are private, deleted or region-locked are skipped rather than
+killing the run, and the count of skipped items is shown at the end.
+Re-running the same playlist picks up where it left off.
+
+A video link that *also* carries a playlist — `watch?v=…&list=…`, which is
+what YouTube gives you for anything in an autoplay mix — downloads just the
+video, same as before. Those mixes run to hundreds of items, so the whole
+playlist is offered as an extra row in the picker (`⧉ the whole playlist
+instead`) rather than assumed.
 
 yoinks takes over the terminal (full-screen, centered — and restores your
 scrollback on exit). Pick a format with ↑/↓ (or j/k, or number keys) and
@@ -79,7 +102,7 @@ To try it as a global command without publishing: `npm link`, then run
 
 - [ ] `--best` / `--mp3` flags to skip the picker (scriptable mode)
 - [ ] `-o <dir>` to choose the output folder
-- [ ] Playlist / thread-with-multiple-videos support
+- [x] Playlist support (threads with multiple videos still to do)
 - [ ] Clipboard detection: launch bare and auto-suggest the url you copied
 - [ ] Self-update for the bundled yt-dlp binary (`yt-dlp -U`)
 - [x] Publish to npm (`npm i -g yoinks` / `npx yoinks`)

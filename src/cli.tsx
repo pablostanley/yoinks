@@ -20,6 +20,7 @@ const HELP = `
   Examples
     $ yoinks https://youtu.be/dQw4w9WgXcQ
     $ yoinks https://x.com/user/status/123456
+    $ yoinks https://youtube.com/playlist?list=PL123   (whole playlist)
     $ yoinks                 (prompts for a url)
 
   Options
@@ -27,7 +28,9 @@ const HELP = `
     -h, --help      show this help
     -v, --version   show version
 
-  Downloads are saved to ~/Downloads.
+  Downloads are saved to ~/Downloads — a playlist into its own folder there.
+  A video url that also carries a playlist (?list=…) downloads just the
+  video; the picker offers the whole playlist as an extra row.
   Powered by yt-dlp — YouTube, X, Instagram, Threads, TikTok & 1800+ sites.
 `
 
@@ -94,6 +97,8 @@ const {waitUntilExit} = render(
 await waitUntilExit()
 
 if (isTTY) leaveAltScreen()
-if (outcome.filepath) {
-  console.log(`✓ yoinked → ${outcome.filepath}`)
+if (outcome.filepaths?.length) {
+  for (const filepath of outcome.filepaths) {
+    console.log(`✓ yoinked → ${filepath}`)
+  }
 }
